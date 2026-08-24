@@ -7,7 +7,7 @@ set -euo pipefail
 # Reference: apps/feigram from conversun/fnos-apps
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # 版本兜底与 Node 版本均以 meta.env 为单一来源
 DSH_FALLBACK_VERSION="${DSH_FALLBACK_VERSION:-$(sed -n 's/^DSH_FALLBACK_VERSION=//p' "${SCRIPT_DIR}/meta.env" 2>/dev/null | tr -d '[:space:]')}"

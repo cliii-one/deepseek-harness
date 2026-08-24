@@ -41,7 +41,7 @@ jobs:
         env:
           VERSION: ${{ inputs.version }}
           TARBALL_ARCH: amd64
-        run: bash scripts/apps/deepseek-harness/build.sh
+        run: bash scripts/build.sh
 
       - name: Build FPK (x86)
         if: inputs.platform == 'both' || inputs.platform == 'x86'
