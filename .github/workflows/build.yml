@@ -30,7 +30,7 @@ jobs:
         with:
           node-version: 22
 
-      # build.sh 内部完成：下载Node → npm install DSH → 补丁patch.py → 输出 app_arm64.tgz
+      # build.sh: 下载Node → npm install DSH → patch.py补丁 → 输出 app_arm64.tgz
       - name: 构建 App 包
         working-directory: scripts
         env:
@@ -64,28 +64,38 @@ jobs:
             [ -f "$f" ] && sed -i 's/\r$//' "$f" && chmod +x "$f"
           done
 
-      # build.sh 已经生成了完整的 app_arm64.tgz（含Node+DSH+补丁+runner+ui）
-      # 直接复制为 fnpack 需要的 app.tgz，不重新打包
-      - name: 准备 app.tgz
-        run: cp app_arm64.tgz deepseek-harness/app.tgz
-
-      # fnpack 读取 deepseek-harness/ 目录生成 FPK
-      - name: 下载 fnpack 并打包
-        working-directory: deepseek-harness
+      # FPK = tar.gz，所有文件在根目录
+      - name: 打包 FPK
         run: |
-          curl -fsSL -o /tmp/fnpack https://static2.fnnas.com/fnpack/fnpack-1.2.1-linux-arm64
-          chmod +x /tmp/fnpack
-          /tmp/fnpack build --directory .
           VERSION="${{ steps.version.outputs.version }}"
-          FPKN=$(ls *.fpk)
-          mv "$FPKN" "deepseek-harness_${VERSION}_arm.fpk"
-          echo "✅ 构建完成: $(ls -lh *.fpk)"
+          FPK_NAME="deepseek-harness_${VERSION}_arm.fpk"
+          PKG="deepseek-harness"
+
+          # 复制 app.tgz 到 deepseek-harness/
+          cp app_arm64.tgz "$PKG/app.tgz"
+
+          # 打包 FPK（所有文件在根目录，与参考项目一致）
+          cd "$PKG"
+          tar -cf "../${FPK_NAME}" \
+            manifest \
+            ICON.PNG \
+            ICON_256.PNG \
+            app.tgz \
+            cmd/ \
+            config/ \
+            wizard/ \
+            ui/ \
+            DeepSeekHarness.sc
+          cd ..
+          gzip -1 "${FPK_NAME}"
+
+          echo "✅ 构建完成: $(ls -lh ${FPK_NAME})"
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
           name: fpk-arm
-          path: deepseek-harness/*.fpk
+          path: "deepseek-harness_*.fpk"
           if-no-files-found: error
 
   build-x86:
@@ -132,25 +142,35 @@ jobs:
             [ -f "$f" ] && sed -i 's/\r$//' "$f" && chmod +x "$f"
           done
 
-      - name: 准备 app.tgz
-        run: cp app_amd64.tgz deepseek-harness/app.tgz
-
-      - name: 下载 fnpack 并打包
-        working-directory: deepseek-harness
+      - name: 打包 FPK
         run: |
-          curl -fsSL -o /tmp/fnpack https://static2.fnnas.com/fnpack/fnpack-1.2.1-linux-amd64
-          chmod +x /tmp/fnpack
-          /tmp/fnpack build --directory .
           VERSION="${{ steps.version.outputs.version }}"
-          FPKN=$(ls *.fpk)
-          mv "$FPKN" "deepseek-harness_${VERSION}_x86.fpk"
-          echo "✅ 构建完成: $(ls -lh *.fpk)"
+          FPK_NAME="deepseek-harness_${VERSION}_x86.fpk"
+          PKG="deepseek-harness"
+
+          cp app_amd64.tgz "$PKG/app.tgz"
+
+          cd "$PKG"
+          tar -cf "../${FPK_NAME}" \
+            manifest \
+            ICON.PNG \
+            ICON_256.PNG \
+            app.tgz \
+            cmd/ \
+            config/ \
+            wizard/ \
+            ui/ \
+            DeepSeekHarness.sc
+          cd ..
+          gzip -1 "${FPK_NAME}"
+
+          echo "✅ 构建完成: $(ls -lh ${FPK_NAME})"
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
           name: fpk-x86
-          path: deepseek-harness/*.fpk
+          path: "deepseek-harness_*.fpk"
           if-no-files-found: error
 
   release:
