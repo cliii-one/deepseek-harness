@@ -96,13 +96,13 @@ echo "==> Bundling pnpm ${PNPM_VERSION} for DSH plugin management..."
 test -x "${WORK_DIR}/app_root/bin/pnpm"
 
 # 复制 ui 目录和 runner 脚本至 app_root (解压后位于 ${TRIM_APPDEST})
-if [ -d "${REPO_ROOT}/app/ui" ]; then
+if [ -d "${REPO_ROOT}/deepseek-harness/app/ui" ]; then
     echo "==> Bundling desktop UI config..."
-    cp -r "${REPO_ROOT}/app/ui" "${WORK_DIR}/app_root/ui"
+    cp -r "${REPO_ROOT}/deepseek-harness/app/ui" "${WORK_DIR}/app_root/ui"
 fi
-if [ -d "${REPO_ROOT}/app/bin" ]; then
+if [ -d "${REPO_ROOT}/deepseek-harness/app/bin" ]; then
     echo "==> Bundling runner script..."
-    cp -r "${REPO_ROOT}/app/bin/." "${WORK_DIR}/app_root/bin/"
+    cp -r "${REPO_ROOT}/deepseek-harness/app/bin/." "${WORK_DIR}/app_root/bin/"
     chmod +x "${WORK_DIR}/app_root/bin/"* 2>/dev/null || true
 fi
 
