@@ -7,7 +7,11 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'DSH npm版本 (留空则使用manifest中的版本)'
+        description: '发布版本号 (用于Release标签，留空则自动生成)'
+        required: false
+        default: ''
+      dsh_version:
+        description: 'DSH npm版本 (留空则自动获取最新版本)'
         required: false
         default: ''
       platform:
@@ -39,35 +43,64 @@ jobs:
 
       - name: Build App Package
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ inputs.dsh_version }}
           TARBALL_ARCH: amd64
         run: bash scripts/build.sh
 
       - name: Build FPK (x86)
         if: inputs.platform == 'both' || inputs.platform == 'x86'
-        run: bash build-fpk.sh "${{ inputs.version }}" x86
+        run: bash build-fpk.sh "${{ inputs.dsh_version }}" x86
 
       - name: Build FPK (ARM)
         if: inputs.platform == 'both' || inputs.platform == 'arm'
-        run: bash build-fpk.sh "${{ inputs.version }}" arm
+        run: bash build-fpk.sh "${{ inputs.dsh_version }}" arm
 
-      - name: List Artifacts
-        run: ls -lh *.fpk 2>/dev/null || echo "无FPK产物"
+      - name: Get Version Info
+        id: version
+        run: |
+          # 获取manifest中的版本
+          MANIFEST_VER=$(grep "^version" deepseek-harness/manifest | awk -F'=' '{print $2}' | tr -d ' ')
+          echo "manifest_ver=${MANIFEST_VER}" >> $GITHUB_OUTPUT
+          
+          # 确定发布版本号
+          if [ -n "${{ inputs.version }}" ]; then
+            echo "release_ver=${{ inputs.version }}" >> $GITHUB_OUTPUT
+          elif [ -n "${{ github.ref_name }}" ] && [[ "${{ github.ref_name }}" == v* ]]; then
+            echo "release_ver=${{ github.ref_name#v }}" >> $GITHUB_OUTPUT
+          else
+            echo "release_ver=${MANIFEST_VER}" >> $GITHUB_OUTPUT
+          fi
+          
+          # 列出构建产物
+          echo "构建产物:"
+          ls -lh *.fpk 2>/dev/null || echo "无FPK产物"
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: deepseek-harness-fpk
+          name: deepseek-harness-fpk-${{ steps.version.outputs.release_ver }}
           path: "*.fpk"
           if-no-files-found: warn
 
       - name: Create Release
-        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ steps.version.outputs.release_ver }}
+          name: "DeepSeek Harness v${{ steps.version.outputs.release_ver }}"
           files: "*.fpk"
           draft: false
           prerelease: false
           generate_release_notes: true
+          body: |
+            ## DeepSeek Harness v${{ steps.version.outputs.release_ver }}
+            
+            ### 下载安装包
+            - **x86_64**: `deepseek-harness_${{ steps.version.outputs.release_ver }}_x86.fpk`
+            - **ARM64**: `deepseek-harness_${{ steps.version.outputs.release_ver }}_arm.fpk`
+            
+            ### 安装方式
+            1. 下载对应架构的 `.fpk` 文件
+            2. 登录飞牛NAS桌面 → 应用中心 → 手动安装
+            3. 选择下载的文件完成安装
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
