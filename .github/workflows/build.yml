@@ -73,49 +73,40 @@ jobs:
 
       - name: 打包 FPK
         run: |
-          cd ..
-          VERSION="${{ steps.version.outputs.version }}"
-          PLATFORM="${{ matrix.fnpack_platform }}"
-          FPK_NAME="deepseek-harness_${VERSION}_${PLATFORM}.fpk"
-          PKG="deepseek-harness"
+          # 下载 fnpack
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            curl -fsSL -o /tmp/fnpack https://static2.fnnas.com/fnpack/fnpack-1.2.1-linux-arm64
+          else
+            curl -fsSL -o /tmp/fnpack https://static2.fnnas.com/fnpack/fnpack-1.2.1-linux-amd64
+          fi
+          chmod +x /tmp/fnpack
 
-          # 先把 app/ 目录打包成 app.tgz
+          # 打包 app.tgz
+          cd ..
           python3 -c "
           import tarfile, os
           with tarfile.open('app.tgz', 'w:gz') as tar:
-              for root, dirs, files in os.walk('${PKG}/app'):
+              for root, dirs, files in os.walk('deepseek-harness/app'):
                   for f in files:
                       full = os.path.join(root, f)
-                      tar.add(full, arcname=os.path.relpath(full, '${PKG}/app'))
+                      tar.add(full, arcname=os.path.relpath(full, 'deepseek-harness/app'))
           "
+          mv app.tgz deepseek-harness/
 
-          # 复制一份需要的文件到临时目录
-          TMP=$(mktemp -d)
-          cp "${PKG}/manifest" "$TMP/"
-          cp "${PKG}/ICON.PNG" "$TMP/"
-          cp "${PKG}/ICON_256.PNG" "$TMP/"
-          cp "${PKG}/DeepSeekHarness.sc" "$TMP/" 2>/dev/null || true
-          cp -a "${PKG}/cmd" "$TMP/"
-          cp -a "${PKG}/config" "$TMP/"
-          cp -a "${PKG}/wizard" "$TMP/"
-          cp -a "${PKG}/app/ui" "$TMP/ui"
-          cp app.tgz "$TMP/"
-
-          # 打包 FPK（所有文件在根目录）
-          cd "$TMP"
-          tar -cf "../${FPK_NAME}" manifest ICON.PNG ICON_256.PNG cmd/ config/ wizard/ ui/ app.tgz
-          cd ..
-          gzip -1 "${FPK_NAME}"
-          mv "${FPK_NAME}.gz" "${FPK_NAME}"
-          rm -rf "$TMP" app.tgz
-
-          echo "✅ 构建完成: $(ls -h ${FPK_NAME})"
+          # 使用 fnpack 打包 FPK
+          cd deepseek-harness
+          /tmp/fnpack build --directory .
+          FPKN=$(ls *.fpk)
+          VERSION="${{ steps.version.outputs.version }}"
+          PLATFORM="${{ matrix.fnpack_platform }}"
+          mv "$FPKN" "deepseek-harness_${VERSION}_${PLATFORM}.fpk"
+          echo "✅ 构建完成: $(ls -lh *.fpk)"
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
           name: fpk-${{ matrix.fnpack_platform }}
-          path: "deepseek-harness_*.fpk"
+          path: "deepseek-harness/*.fpk"
           if-no-files-found: error
 
   release:
