@@ -11,3 +11,5 @@ pnpm-lock.yaml
 *.pid
 .dsh/
 scratch/
+__pycache__/
+*.pyc

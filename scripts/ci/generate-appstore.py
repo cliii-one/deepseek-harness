@@ -39,14 +39,14 @@ def build_app_entry(repo: str, ver: str, tag_name: str, fpk_file: str, platform:
     arch_label = 'x86_64' if platform == 'x86' else 'ARM64 / aarch64'
     return {
         'name': 'DeepSeekHarness',
-        'title': f'DeepSeek Harness (一万AI分享定制版 - {platform.upper()})',
+        'title': f'DeepSeek Harness ({platform.upper()})',
         'version': ver,
         'platform': platform,
-        'author': '一万AI分享',
-        'description': f'DeepSeek 官方 AI 开发助手与桌面工作台 ({arch_label} 架构)。预制一万AI分享提供商，模型和 API 均可编辑，文件管理实时互通。',
+        'author': 'DeepSeek AI',
+        'description': f'DeepSeek 官方 AI 开发助手与桌面工作台 ({arch_label} 架构)。支持多模型、多通道及 Web UI 管理，文件管理实时互通。',
         'icon': f'https://raw.githubusercontent.com/{repo}/main/apps/deepseek-harness/fnos/ICON_256.PNG',
         'download_url': f'https://github.com/{repo}/releases/download/{tag_name}/{fpk_file}',
-        'changelog': '一键开箱即用，支持局域网非安全上下文 Polyfill，飞牛文件管理双向打通。'
+        'changelog': '支持局域网非安全上下文 Polyfill，飞牛文件管理双向打通。'
     }
 
 
@@ -56,7 +56,7 @@ def build_index_html(ver: str, app_x86: dict, app_arm: dict) -> str:
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>一万AI分享 · 飞牛 NAS 专属应用发布站 (x86 & ARM)</title>
+    <title>DeepSeek Harness · 飞牛 NAS 应用发布站 (x86 & ARM)</title>
     <style>
         body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 860px; margin: 40px auto; padding: 0 20px; color: #24292e; line-height: 1.6; background-color: #f6f8fa; }}
         .container {{ background: #fff; border: 1px solid #e1e4e8; border-radius: 12px; padding: 32px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }}
@@ -74,15 +74,14 @@ def build_index_html(ver: str, app_x86: dict, app_arm: dict) -> str:
 </head>
 <body>
     <div class="container">
-        <h1>🚀 一万AI分享 · 飞牛 NAS 专属应用发布站</h1>
-        <p>欢迎使用一万AI分享专属维护的飞牛私有云应用。现已全量支持 <strong>x86_64</strong> 与 <strong>ARM64</strong> 双架构！</p>
+        <h1>🚀 DeepSeek Harness · 飞牛 NAS 应用发布站</h1>
+        <p>DeepSeek 官方 AI 开发助手与桌面工作台，支持 <strong>x86_64</strong> 与 <strong>ARM64</strong> 双架构。</p>
 
         <div class="card">
             <h3>🤖 DeepSeek Harness <span class="badge">{ver}</span></h3>
-            <p>DeepSeek 官方 AI 开发助手与桌面工作台（一万AI分享定制版）。</p>
+            <p>DeepSeek 官方 AI 开发助手与桌面工作台。</p>
             <ul>
-                <li><strong>内置公益端点</strong>：<code>https://api.910501.xyz/v1</code></li>
-                <li><strong>预制提供商</strong>：一万AI分享（支持多个模型和自定义 API）</li>
+                <li><strong>多模型支持</strong>：支持多个模型和自定义 API</li>
                 <li><strong>文件打通</strong>：实时互通至飞牛桌面【文件管理】&rarr;【应用文件】</li>
             </ul>
             <div class="btn-group">
@@ -94,7 +93,7 @@ def build_index_html(ver: str, app_x86: dict, app_arm: dict) -> str:
         <div class="card">
             <h3>📦 FnDepot 第三方应用源</h3>
             <p>在 FnDepot 的【源管理 &rarr; 添加源】中填入下面的地址即可一键安装与更新：</p>
-            <p><code>https://10000ge10000.github.io/deepseek-harness-fpk/fnpack.json</code></p>
+            <p><code>https://cliii-one.github.io/deepseek-harness/fnpack.json</code></p>
         </div>
     </div>
 </body>
@@ -127,26 +126,26 @@ def build_fnpack(repo: str, ver: str, tag_name: str,
     return {
         'schema_version': '2',
         'source_info': {
-            'name': '一万AI分享应用源',
-            'author': '一万AI分享',
-            'homepage': 'https://space.bilibili.com/59438380',
-            'description': '一万AI分享维护的飞牛私有云 NAS 第三方应用源（x86 与 ARM64 双架构）',
+            'name': 'DeepSeek Harness 应用源',
+            'author': 'DeepSeek AI',
+            'homepage': 'https://github.com/deepseek-ai/deepseek-harness',
+            'description': 'DeepSeek 官方 AI 开发助手与桌面工作台（飞牛 NAS 应用源，x86 与 ARM64 双架构）',
         },
         'apps': {
             'deepseek-harness': {
                 'display_name': 'DeepSeek Harness',
-                'desc': 'DeepSeek 官方开源 AI 开发助手与桌面工作台（一万AI分享定制版）。'
-                        '内置公益 API 端点开箱即用，模型与 API 均可编辑；'
+                'desc': 'DeepSeek 官方开源 AI 开发助手与桌面工作台。'
+                        '支持多模型、多通道及 Web UI 管理；'
                         '工作区与飞牛【文件管理】实时互通，支持局域网非安全上下文。',
                 'platform': ['x86', 'arm'],
                 'categories': ['AI赋能'],
                 'icon_url': f'https://raw.githubusercontent.com/{repo}/main/apps/deepseek-harness/fnos/ICON_256.PNG',
-                'maintainer': '一万AI分享',
-                'maintainer_url': 'https://space.bilibili.com/59438380',
+                'maintainer': 'DeepSeek AI',
+                'maintainer_url': 'https://github.com/deepseek-ai/deepseek-harness',
                 # FnDepot 0.0.7 兼容字段（详见函数 docstring）
                 'version': ver,
-                'author': '一万AI分享',
-                'distributor': '一万AI分享',
+                'author': 'DeepSeek AI',
+                'distributor': 'DeepSeek AI',
                 'download_url': packages['x86']['download_url'],
                 'sha256': packages['x86']['sha256'],
                 # 0.0.7 的展示逻辑直接拼 "${size} MB"，顶层用 MB 取整；
@@ -158,9 +157,7 @@ def build_fnpack(repo: str, ver: str, tag_name: str,
                 'service_port': '3080',
                 'releases': {
                     ver: {
-                        'changelog': '开箱即用的公益端点与预制提供商；'
-                                     '凭据权限收紧（600）；停止彻底释放端口；'
-                                     '支持局域网 Polyfill 与飞牛文件管理双向互通。',
+                        'changelog': '支持局域网 Polyfill 与飞牛文件管理双向互通。',
                         'updated_at': updated_at,
                         'packages': packages,
                     },
@@ -180,15 +177,15 @@ def main() -> None:
     parser.add_argument('--pkg-dir', default='.', help='安装包所在目录（用于计算 sha256/size）')
     args = parser.parse_args()
 
-    repo = os.environ.get('GITHUB_REPOSITORY', '10000ge10000/deepseek-harness-fpk')
+    repo = os.environ.get('GITHUB_REPOSITORY', 'cliii-one/deepseek-harness')
 
     app_x86 = build_app_entry(repo, args.version, args.tag, args.x86_fpk, 'x86')
     app_arm = build_app_entry(repo, args.version, args.tag, args.arm_fpk, 'arm')
 
     store_data = {
-        'name': '一万AI分享应用源',
-        'description': '一万AI分享 飞牛私有云 NAS 第三方应用源 (支持 x86 与 ARM64 双架构)',
-        'url': 'https://10000ge10000.github.io/deepseek-harness-fpk/',
+        'name': 'DeepSeek Harness 应用源',
+        'description': 'DeepSeek 官方 AI 开发助手与桌面工作台（飞牛 NAS 应用源，支持 x86 与 ARM64 双架构）',
+        'url': f'https://{repo.split("/")[0]}.github.io/{repo.split("/")[1]}/',
         'apps': [app_x86, app_arm]
     }
 
@@ -205,7 +202,7 @@ def main() -> None:
         f.write(build_index_html(args.version, app_x86, app_arm))
 
     print(f'[OK] 已生成应用源文件至 {args.out_dir}/ (repo={repo}, tag={args.tag})')
-    print(f'[OK] FnDepot 源: https://10000ge10000.github.io/deepseek-harness-fpk/fnpack.json')
+    print(f'[OK] FnDepot 源: https://{repo.split("/")[0]}.github.io/{repo.split("/")[1]}/fnpack.json')
 
 
 if __name__ == '__main__':

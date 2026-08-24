@@ -9,15 +9,15 @@
 | 字段名 | 提报内容 |
 | :--- | :--- |
 | **应用名称 (appname)** | `DeepSeekHarness` |
-| **应用中文名** | `DeepSeek Harness` (一万AI分享定制版) |
+| **应用中文名** | `DeepSeek Harness` |
 | **版本号 (version)** | 以 [`apps/deepseek-harness/fnos/manifest`](apps/deepseek-harness/fnos/manifest) 中的 `version` 为准（提报时同步更新） |
 | **适用架构 (platform)** | `x86_64` (amd64) 与 `ARM64` (aarch64) 双架构 |
 | **应用分类** | AI 工具 / 开发运维 |
-| **开发者/发布者** | `一万AI分享` |
-| **官方网站** | `https://api.910501.xyz` |
-| **开源代码库** | `https://github.com/10000ge10000/deepseek-harness-fpk` |
-| **一句话描述** | DeepSeek 官方 AI 开发助手与桌面工作台，开箱即用。 |
-| **详细介绍** | DeepSeek Harness 是 DeepSeek 官方开源的 AI 本地工作台与编程助手。本项目为飞牛 NAS 提供深度适配，内置「一万AI分享」公益 API 接口与专属模型，并已彻底打通飞牛桌面【文件管理】中的应用工作区，支持在局域网内直接流畅调用。 |
+| **开发者/发布者** | `DeepSeek AI` |
+| **官方网站** | `https://github.com/deepseek-ai/deepseek-harness` |
+| **开源代码库** | `https://github.com/cliii-one/deepseek-harness` |
+| **一句话描述** | DeepSeek 官方 AI 开发助手与桌面工作台。 |
+| **详细介绍** | DeepSeek Harness 是 DeepSeek 官方开源的 AI 本地工作台与编程助手。本项目为飞牛 NAS 提供深度适配，已打通飞牛桌面【文件管理】中的应用工作区，支持在局域网内直接流畅调用。 |
 
 ---
 
@@ -29,7 +29,7 @@
   - 64x64 图标：[`apps/deepseek-harness/fnos/ICON.PNG`](apps/deepseek-harness/fnos/ICON.PNG)
   - 256x256 高清图标：[`apps/deepseek-harness/fnos/ICON_256.PNG`](apps/deepseek-harness/fnos/ICON_256.PNG)
 - **安装向导文件**：[`apps/deepseek-harness/fnos/wizard/install`](apps/deepseek-harness/fnos/wizard/install)
-- **完整安装包**：[GitHub Releases 下载链接](https://github.com/10000ge10000/deepseek-harness-fpk/releases/latest)
+- **完整安装包**：[GitHub Releases 下载链接](https://github.com/cliii-one/deepseek-harness/releases/latest)
 
 ---
 

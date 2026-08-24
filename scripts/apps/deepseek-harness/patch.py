@@ -3,50 +3,6 @@ import re
 import sys
 
 
-PRESET_PROVIDER_LABEL = '一万AI分享'
-PRESET_MODEL_LABEL = '一万AI分享DSH专用模型'
-
-# 上游 dsh-llm-deepseek 的内置模型目录（tab 缩进，字节级精确匹配）。
-# 上游给三条内置模型且 contextWindow=1e6（1M）：多轮会话请求体按 1M 滚雪球
-# 是首字耗时飙升的根因；且 settings.yaml 的 defaultContextWindow 只对目录
-# 之外的模型兜底（configured?.contextWindow ?? defaultContextWindow），对
-# 内置条目不生效，必须改插件常量本身。
-DEFAULT_MODELS_UPSTREAM = (
-    'const DEFAULT_MODELS = [\n'
-    '\t{\n'
-    '\t\tid: "deepseek-v4-flash",\n'
-    '\t\tname: "DeepSeek-V4-Flash",\n'
-    '\t\tcontextWindow: DEFAULT_CONTEXT_WINDOW\n'
-    '\t},\n'
-    '\t{\n'
-    '\t\tid: "deepseek-v4-pro",\n'
-    '\t\tname: "DeepSeek-V4-Pro",\n'
-    '\t\tcontextWindow: DEFAULT_CONTEXT_WINDOW\n'
-    '\t},\n'
-    '\t{\n'
-    '\t\tid: "deepseek-v4-flash-vision-exp",\n'
-    '\t\tname: "DeepSeek-V4-Flash-Vision-Exp",\n'
-    '\t\tcontextWindow: DEFAULT_CONTEXT_WINDOW,\n'
-    '\t\tinputModalities: ["text", "image"],\n'
-    '\t\timagePixelBudget: DEFAULT_REQUEST_IMAGE_PIXEL_BUDGET,\n'
-    '\t\timageMaxBytes: DEFAULT_REQUEST_IMAGE_MAX_BYTES\n'
-    '\t}\n'
-    '];'
-)
-
-# 收敛后的目录：仅保留默认模型（id 不变，API 请求与公益站完全兼容），
-# 显示名换品牌名；上下文由 DEFAULT_CONTEXT_WINDOW=2e5 锁定为 200k，
-# 输出上限由 DEFAULT_MAX_TOKENS=65536 锁定为 64k。
-DEFAULT_MODELS_BRANDED = (
-    'const DEFAULT_MODELS = [\n'
-    '\t{\n'
-    '\t\tid: "deepseek-v4-flash",\n'
-    f'\t\tname: "{PRESET_MODEL_LABEL}",\n'
-    '\t\tcontextWindow: DEFAULT_CONTEXT_WINDOW\n'
-    '\t}\n'
-    '];'
-)
-
 def apply_patches(app_root):
     print(f"[*] 正在为 {app_root} 应用补丁...")
     modules_dir = os.path.join(app_root, 'node_modules', '@deepseek-ai')
@@ -98,43 +54,7 @@ def apply_patches(app_root):
                     )
                     changed = changed or code != before
 
-                # 2. 预制 deepseek-official 路由品牌化：提供商显示名改“一万AI分享”，
-                # 内置模型目录收敛为单一“一万AI分享DSH专用模型”并锁定 200k 上下文。
-                # 提供商内部 ID 不动，用户仍可在 Models 页面编辑配置、新增自己的
-                # 提供商和模型。
-                if 'dsh-llm-deepseek' in p and f == 'index.js':
-                    before = code
-                    code = code.replace('name: "DeepSeek"', f'name: "{PRESET_PROVIDER_LABEL}"')
-                    code = code.replace('displayName: "DeepSeek"', f'displayName: "{PRESET_PROVIDER_LABEL}"')
-                    code = code.replace('const DEFAULT_CONTEXT_WINDOW = 1e6;', 'const DEFAULT_CONTEXT_WINDOW = 2e5;')
-                    code = code.replace(DEFAULT_MODELS_UPSTREAM, DEFAULT_MODELS_BRANDED)
-                    # 输出上限：上游默认 256e3（256k）大于 200k 窗口，语义倒挂；
-                    # 且该值经 dsh-llm resolveCallWithInfo 以 defaultMaxTokens
-                    # 随每个请求作为 max_tokens 下发。收敛为 64k：覆盖 reasoningEffort
-                    # = max 的长推理输出，并为历史输入留出 ≥136k。
-                    code = code.replace('const DEFAULT_MAX_TOKENS = 256e3;', 'const DEFAULT_MAX_TOKENS = 65536;')
-                    code = code.replace('config.maxTokens ?? 256e3', 'config.maxTokens ?? 65536')
-                    changed = changed or code != before
-                    # 目录收敛的结构性复核：整块替换若因上游改版落空，残留的
-                    # v4-pro / vision-exp 条目说明匹配已漂移，必须显式失败，
-                    # 不能带着 1M 上下文的多模型目录发布出去。
-                    if 'id: "deepseek-v4-pro",' in code or 'id: "deepseek-v4-flash-vision-exp",' in code:
-                        structural_failures.append('内置模型目录仍含 v4-pro / vision-exp 条目（DEFAULT_MODELS 匹配漂移，需人工更新 patch.py）')
-
-                if 'dsh-client-connection' in p and f == 'client.js':
-                    code, group_replacements = re.subn(
-                        r'(id:\s*"deepseek-official",\s*name:\s*)"DeepSeek"',
-                        rf'\1"{PRESET_PROVIDER_LABEL}"',
-                        code,
-                    )
-                    code, provider_replacements = re.subn(
-                        r'(provider:\s*"deepseek-official",\s*displayName:\s*)"DeepSeek"',
-                        rf'\1"{PRESET_PROVIDER_LABEL}"',
-                        code,
-                    )
-                    changed = changed or group_replacements > 0 or provider_replacements > 0
-
-                # 3. 定制 dsh-host-directory-picker-browse 飞牛共享目录
+                # 2. 定制 dsh-host-directory-picker-browse 飞牛共享目录
                 if 'dsh-host-directory-picker-browse' in p and f == 'index.js':
                     # 上游 rc.8 起生成物以 `import fs from "node:fs";` 开头，
                     # 两种引号形式都覆盖；若该行不存在则跳过（保持原文件）。
@@ -184,13 +104,6 @@ def apply_patches(app_root):
         'CSRF 信任放行': 'isTrustedApiRequest(request, trustedHosts) { return true;',
         'loopback 信任修复 (Issue #2)': 'isLoopbackHostname(hostname) { return true;',
         '浏览器端 isLoopback 直连': 'isLoopback: true, // fnOS fix',
-        '上下文窗口锁定 200k': 'const DEFAULT_CONTEXT_WINDOW = 2e5;',
-        '单一品牌模型目录': f'name: "{PRESET_MODEL_LABEL}"',
-        '输出上限锁定 64k（常量）': 'const DEFAULT_MAX_TOKENS = 65536;',
-        '输出上限锁定 64k（回退值）': 'config.maxTokens ?? 65536',
-    }
-    OPTIONAL_MARKERS = {
-        '提供商改名（外观性，缺失仅告警）': 'name: "一万AI分享"',
     }
 
     def count_marker(marker):
@@ -214,10 +127,6 @@ def apply_patches(app_root):
             failed = True
         else:
             print(f"[OK] 关键补丁验证通过: {label}（{hits} 处）")
-    for label, marker in OPTIONAL_MARKERS.items():
-        hits = count_marker(marker)
-        level = 'OK' if hits > 0 else 'WARN'
-        print(f"[{level}] 可选补丁 {label}: {hits} 处")
     for msg in structural_failures:
         print(f"[FAIL] {msg}")
         failed = True
