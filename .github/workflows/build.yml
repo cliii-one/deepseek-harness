@@ -6,10 +6,6 @@ on:
       - 'v*'
   workflow_dispatch:
     inputs:
-      version:
-        description: '发布版本号 (用于Release标签，留空则自动生成)'
-        required: false
-        default: ''
       dsh_version:
         description: 'DSH npm版本 (留空则自动获取最新版本)'
         required: false
@@ -55,22 +51,27 @@ jobs:
         if: inputs.platform == 'both' || inputs.platform == 'arm'
         run: bash build-fpk.sh "${{ inputs.dsh_version }}" arm
 
-      - name: Get Version Info
+      - name: Get DSH Version
         id: version
         run: |
-          # 获取manifest中的版本
-          MANIFEST_VER=$(grep "^version" deepseek-harness/manifest | awk -F'=' '{print $2}' | tr -d ' ')
-          echo "manifest_ver=${MANIFEST_VER}" >> $GITHUB_OUTPUT
-          
-          # 确定发布版本号
-          if [ -n "${{ inputs.version }}" ]; then
-            echo "release_ver=${{ inputs.version }}" >> $GITHUB_OUTPUT
-          elif [ -n "${{ github.ref_name }}" ] && [[ "${{ github.ref_name }}" == v* ]]; then
-            REF_NAME="${{ github.ref_name }}"
-            echo "release_ver=${REF_NAME#v}" >> $GITHUB_OUTPUT
-          else
-            echo "release_ver=${MANIFEST_VER}" >> $GITHUB_OUTPUT
+          # 从构建产物中获取实际使用的DSH版本
+          if [ -f app_amd64.tgz ]; then
+            # 从app.tgz中提取package.json获取版本
+            DSH_VER=$(tar -xzf app_amd64.tgz -O node_modules/@deepseek-ai/dsh/package.json 2>/dev/null | grep '"version"' | head -1 | sed 's/.*"version": *"\([^"]*\)".*/\1/')
           fi
+          
+          # 如果无法从包中获取，尝试从npm查询
+          if [ -z "$DSH_VER" ]; then
+            DSH_VER=$(npm view @deepseek-ai/dsh dist-tags.next 2>/dev/null || npm view @deepseek-ai/dsh@latest version 2>/dev/null || echo "")
+          fi
+          
+          # 如果还是空，使用manifest版本
+          if [ -z "$DSH_VER" ]; then
+            DSH_VER=$(grep "^version" deepseek-harness/manifest | awk -F'=' '{print $2}' | tr -d ' ')
+          fi
+          
+          echo "dsh_version=${DSH_VER}" >> $GITHUB_OUTPUT
+          echo "DSH版本: ${DSH_VER}"
           
           # 列出构建产物
           echo "构建产物:"
@@ -79,25 +80,27 @@ jobs:
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: deepseek-harness-fpk-${{ steps.version.outputs.release_ver }}
+          name: deepseek-harness-${{ steps.version.outputs.dsh_version }}
           path: "*.fpk"
           if-no-files-found: warn
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.version.outputs.release_ver }}
-          name: "DeepSeek Harness v${{ steps.version.outputs.release_ver }}"
+          tag_name: v${{ steps.version.outputs.dsh_version }}
+          name: "DeepSeek Harness v${{ steps.version.outputs.dsh_version }}"
           files: "*.fpk"
           draft: false
           prerelease: false
           generate_release_notes: true
           body: |
-            ## DeepSeek Harness v${{ steps.version.outputs.release_ver }}
+            ## DeepSeek Harness v${{ steps.version.outputs.dsh_version }}
+            
+            基于 DeepSeek Harness (DSH) ${{ steps.version.outputs.dsh_version }} 构建
             
             ### 下载安装包
-            - **x86_64**: `deepseek-harness_${{ steps.version.outputs.release_ver }}_x86.fpk`
-            - **ARM64**: `deepseek-harness_${{ steps.version.outputs.release_ver }}_arm.fpk`
+            - **x86_64**: `deepseek-harness_${{ steps.version.outputs.dsh_version }}_x86.fpk`
+            - **ARM64**: `deepseek-harness_${{ steps.version.outputs.dsh_version }}_arm.fpk`
             
             ### 安装方式
             1. 下载对应架构的 `.fpk` 文件
