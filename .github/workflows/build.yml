@@ -11,7 +11,7 @@ on:
         options:
           - arm
           - x86
-          - both
+          - all
 
 permissions:
   contents: write
@@ -36,11 +36,11 @@ jobs:
         run: bash scripts/build.sh
 
       - name: Build FPK (x86)
-        if: inputs.platform == 'both' || inputs.platform == 'x86'
+        if: inputs.platform == 'all' || inputs.platform == 'x86'
         run: bash build-fpk.sh "" x86
 
       - name: Build FPK (ARM)
-        if: inputs.platform == 'both' || inputs.platform == 'arm'
+        if: inputs.platform == 'all' || inputs.platform == 'arm'
         run: bash build-fpk.sh "" arm
 
       - name: Get DSH Version
