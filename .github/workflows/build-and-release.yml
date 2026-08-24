@@ -1,0 +1,166 @@
+name: Build and Release DeepSeek Harness FPK
+
+on:
+  push:
+    tags:
+      - 'v*'
+  schedule:
+    - cron: '0 0,12 * * *'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '发布版本号 (留空则默认读取 manifest)'
+        required: false
+        default: ''
+      dsh_version:
+        description: '上游 DSH npm 版本 (留空则沿用当前打包基线)'
+        required: false
+        default: ''
+      release_title:
+        description: 'Release 标题'
+        required: false
+        default: ''
+      force_rebuild:
+        description: '即使同版本 Release 已存在也重新构建并覆盖资产'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: deepseek-harness-fpk-release
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Lint and Unit Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      - name: Run Test Suite
+        run: bash tests/run-tests.sh
+
+  resolve_version:
+    name: Resolve DSH Version and Release Policy
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      target_ver: ${{ steps.resolve.outputs.target_ver }}
+      dsh_ver: ${{ steps.resolve.outputs.dsh_ver }}
+      tag_name: ${{ steps.resolve.outputs.tag_name }}
+      should_build: ${{ steps.resolve.outputs.should_build }}
+      publish_release: ${{ steps.resolve.outputs.publish_release }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      - name: Setup Node.js for npm Registry Query
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Resolve Target Version
+        id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          VERSION_INPUT: ${{ inputs.version }}
+          DSH_VERSION_INPUT: ${{ inputs.dsh_version }}
+          FORCE_REBUILD: ${{ inputs.force_rebuild }}
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/ci/resolve-version.sh
+
+  build_arm:
+    name: Build ARM64 FPK Package
+    needs: resolve_version
+    if: needs.resolve_version.outputs.should_build == 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      - name: Build ARM (arm64) Package
+        env:
+          DSH_VERSION: ${{ needs.resolve_version.outputs.dsh_ver }}
+          TARGET_VERSION: ${{ needs.resolve_version.outputs.target_ver }}
+          TARBALL_ARCH: arm64
+          FPK_PLATFORM: arm
+        run: bash scripts/ci/build-package.sh
+      - name: Upload ARM Package
+        uses: actions/upload-artifact@v4
+        with:
+          name: deepseek-harness-fpk-arm
+          path: "*_arm.fpk"
+          if-no-files-found: error
+
+  build:
+    name: Build Multi-Arch (x86 & ARM) FPK Packages
+    needs: [resolve_version, build_arm]
+    if: needs.resolve_version.outputs.should_build == 'true' && needs.build_arm.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      - name: Setup Node.js Environment
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build x86 (amd64) Package
+        env:
+          DSH_VERSION: ${{ needs.resolve_version.outputs.dsh_ver }}
+          TARGET_VERSION: ${{ needs.resolve_version.outputs.target_ver }}
+          TARBALL_ARCH: amd64
+          FPK_PLATFORM: x86
+        run: bash scripts/ci/build-package.sh
+      - name: Download ARM Package
+        uses: actions/download-artifact@v4
+        with:
+          name: deepseek-harness-fpk-arm
+          path: .
+      - name: List Built Artifacts
+        id: list_fpk
+        run: |
+          echo "当前已生成的安装包产物:"
+          ls -lh *.fpk
+          bash scripts/ci/list-artifacts.sh
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: deepseek-harness-fpk-all
+          path: "*.fpk"
+          if-no-files-found: error
+      - name: Create GitHub Release
+        id: create_release
+        if: needs.resolve_version.outputs.publish_release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: "*.fpk"
+          tag_name: ${{ needs.resolve_version.outputs.tag_name }}
+          name: ${{ inputs.release_title || format('DeepSeek Harness fnOS {0} (x86 & ARM)', needs.resolve_version.outputs.tag_name) }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Generate fnOS AppStore Index and Webpage
+        if: needs.resolve_version.outputs.publish_release == 'true'
+        env:
+          TARGET_VER: ${{ needs.resolve_version.outputs.target_ver }}
+          TAG_NAME: ${{ needs.resolve_version.outputs.tag_name }}
+          X86_FPK: ${{ steps.list_fpk.outputs.x86_fpk }}
+          ARM_FPK: ${{ steps.list_fpk.outputs.arm_fpk }}
+        run: |
+          python3 scripts/ci/generate-appstore.py \
+            --version "$TARGET_VER" --tag "$TAG_NAME" \
+            --x86-fpk "$X86_FPK" --arm-fpk "$ARM_FPK" \
+            --out-dir public
+      - name: Deploy to GitHub Pages
+        if: needs.resolve_version.outputs.publish_release == 'true'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./public
