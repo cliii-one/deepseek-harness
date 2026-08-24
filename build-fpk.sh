@@ -118,19 +118,19 @@ fi
 # 9. manifest (更新版本、平台、校验和)
 cp "$APP_DIR/manifest" "$PKG_DIR/manifest"
 if [ -n "$VERSION" ]; then
-    sed -i.tmp "s/^version=.*/version=${VERSION}/" "$PKG_DIR/manifest"
+    sed -i.tmp "s/^version.*=.*/version               = ${VERSION}/" "$PKG_DIR/manifest"
 fi
-if grep -q "^platform=" "$PKG_DIR/manifest"; then
-    sed -i.tmp "s/^platform=.*/platform=${NORM_PLATFORM}/" "$PKG_DIR/manifest"
+if grep -q "^platform" "$PKG_DIR/manifest"; then
+    sed -i.tmp "s/^platform.*=.*/platform              = ${NORM_PLATFORM}/" "$PKG_DIR/manifest"
 else
-    echo "platform=${NORM_PLATFORM}" >> "$PKG_DIR/manifest"
+    echo "platform              = ${NORM_PLATFORM}" >> "$PKG_DIR/manifest"
 fi
-sed -i.tmp "s/^checksum=.*/checksum=${CHECKSUM}/" "$PKG_DIR/manifest"
+sed -i.tmp "s/^checksum.*=.*/checksum              = ${CHECKSUM}/" "$PKG_DIR/manifest"
 rm -f "$PKG_DIR/manifest.tmp"
 
 # 输出文件名
-MANIFEST_VERSION=$(grep "^version=" "$PKG_DIR/manifest" | awk -F'=' '{print $2}' | tr -d ' ')
-MANIFEST_PLATFORM=$(grep "^platform=" "$PKG_DIR/manifest" | awk -F'=' '{print $2}' | tr -d ' ')
+MANIFEST_VERSION=$(grep "^version" "$PKG_DIR/manifest" | awk -F'=' '{print $2}' | tr -d ' ')
+MANIFEST_PLATFORM=$(grep "^platform" "$PKG_DIR/manifest" | awk -F'=' '{print $2}' | tr -d ' ')
 FPK_NAME="${APPNAME}_${MANIFEST_VERSION}_${MANIFEST_PLATFORM:-x86}.fpk"
 
 # 10. 打包FPK
