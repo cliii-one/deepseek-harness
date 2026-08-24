@@ -17,21 +17,10 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    runs-on: ${{ matrix.runner }}
-    name: 构建 ${{ matrix.arch }}
-    strategy:
-      matrix:
-        include: ${{ fromJSON(
-          inputs.platform == 'all' && '[{"arch":"arm64","runner":"ubuntu-24.04-arm","fnpack_platform":"arm"},{"arch":"x86_64","runner":"ubuntu-latest","fnpack_platform":"x86"}]' ||
-          inputs.platform == 'arm' && '[{"arch":"arm64","runner":"ubuntu-24.04-arm","fnpack_platform":"arm"}]' ||
-          '[{"arch":"x86_64","runner":"ubuntu-latest","fnpack_platform":"x86"}]'
-        ) }}
-
-    defaults:
-      run:
-        working-directory: deepseek-harness
-
+  build-arm:
+    name: 构建 ARM64
+    if: inputs.platform == 'arm' || inputs.platform == 'all'
+    runs-on: ubuntu-24.04-arm
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -44,13 +33,13 @@ jobs:
       - name: 构建 App 包
         working-directory: scripts
         env:
-          TARBALL_ARCH: ${{ matrix.arch }}
+          TARBALL_ARCH: arm64
         run: bash build.sh
 
-      - name: 确定 DSH 版本号
+      - name: 获取 DSH 版本号
         id: version
         run: |
-          DSH_VER=$(tar -xzf ../app_${{ matrix.arch }}.tgz -O node_modules/@deepseek-ai/dsh/package.json 2>/dev/null | grep '"version"' | head -1 | sed 's/.*"version": *"\([^"]*\)".*/\1/')
+          DSH_VER=$(tar -xzf app_arm64.tgz -O node_modules/@deepseek-ai/dsh/package.json 2>/dev/null | grep '"version"' | head -1 | sed 's/.*"version": *"\([^"]*\)".*/\1/')
           if [ -z "$DSH_VER" ]; then
             DSH_VER=$(npm view @deepseek-ai/dsh@latest version 2>/dev/null)
           fi
@@ -58,31 +47,22 @@ jobs:
           echo "DSH版本: $DSH_VER"
 
       - name: 更新 manifest
+        working-directory: deepseek-harness
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          PLATFORM="${{ matrix.fnpack_platform }}"
           sed -i "s/^version.*/version               = ${VERSION}/" manifest
-          sed -i "s/^platform.*/platform              = ${PLATFORM}/" manifest
+          sed -i "s/^platform.*/platform              = arm/" manifest
           echo "=== manifest ===" && cat manifest
 
       - name: 修复脚本权限
+        working-directory: deepseek-harness
         run: |
           for f in cmd/* wizard/*; do
             [ -f "$f" ] && sed -i 's/\r$//' "$f" && chmod +x "$f"
           done
 
-      - name: 打包 FPK
+      - name: 打包 app.tgz
         run: |
-          # 下载 fnpack
-          if [ "${{ matrix.arch }}" = "arm64" ]; then
-            curl -fsSL -o /tmp/fnpack https://static2.fnnas.com/fnpack/fnpack-1.2.1-linux-arm64
-          else
-            curl -fsSL -o /tmp/fnpack https://static2.fnnas.com/fnpack/fnpack-1.2.1-linux-amd64
-          fi
-          chmod +x /tmp/fnpack
-
-          # 打包 app.tgz
-          cd ..
           python3 -c "
           import tarfile, os
           with tarfile.open('app.tgz', 'w:gz') as tar:
@@ -93,26 +73,103 @@ jobs:
           "
           mv app.tgz deepseek-harness/
 
-          # 使用 fnpack 打包 FPK
-          cd deepseek-harness
+      - name: 下载 fnpack 并打包
+        working-directory: deepseek-harness
+        run: |
+          curl -fsSL -o /tmp/fnpack https://static2.fnnas.com/fnpack/fnpack-1.2.1-linux-arm64
+          chmod +x /tmp/fnpack
           /tmp/fnpack build --directory .
-          FPKN=$(ls *.fpk)
           VERSION="${{ steps.version.outputs.version }}"
-          PLATFORM="${{ matrix.fnpack_platform }}"
-          mv "$FPKN" "deepseek-harness_${VERSION}_${PLATFORM}.fpk"
+          FPKN=$(ls *.fpk)
+          mv "$FPKN" "deepseek-harness_${VERSION}_arm.fpk"
           echo "✅ 构建完成: $(ls -lh *.fpk)"
 
-      - name: 上传构建产物
+      - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: fpk-${{ matrix.fnpack_platform }}
-          path: "deepseek-harness/*.fpk"
+          name: fpk-arm
+          path: deepseek-harness/*.fpk
+          if-no-files-found: error
+
+  build-x86:
+    name: 构建 x86_64
+    if: inputs.platform == 'x86' || inputs.platform == 'all'
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 构建 App 包
+        working-directory: scripts
+        env:
+          TARBALL_ARCH: amd64
+        run: bash build.sh
+
+      - name: 获取 DSH 版本号
+        id: version
+        run: |
+          DSH_VER=$(tar -xzf app_amd64.tgz -O node_modules/@deepseek-ai/dsh/package.json 2>/dev/null | grep '"version"' | head -1 | sed 's/.*"version": *"\([^"]*\)".*/\1/')
+          if [ -z "$DSH_VER" ]; then
+            DSH_VER=$(npm view @deepseek-ai/dsh@latest version 2>/dev/null)
+          fi
+          echo "version=$DSH_VER" >> $GITHUB_OUTPUT
+          echo "DSH版本: $DSH_VER"
+
+      - name: 更新 manifest
+        working-directory: deepseek-harness
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          sed -i "s/^version.*/version               = ${VERSION}/" manifest
+          sed -i "s/^platform.*/platform              = x86/" manifest
+          echo "=== manifest ===" && cat manifest
+
+      - name: 修复脚本权限
+        working-directory: deepseek-harness
+        run: |
+          for f in cmd/* wizard/*; do
+            [ -f "$f" ] && sed -i 's/\r$//' "$f" && chmod +x "$f"
+          done
+
+      - name: 打包 app.tgz
+        run: |
+          python3 -c "
+          import tarfile, os
+          with tarfile.open('app.tgz', 'w:gz') as tar:
+              for root, dirs, files in os.walk('deepseek-harness/app'):
+                  for f in files:
+                      full = os.path.join(root, f)
+                      tar.add(full, arcname=os.path.relpath(full, 'deepseek-harness/app'))
+          "
+          mv app.tgz deepseek-harness/
+
+      - name: 下载 fnpack 并打包
+        working-directory: deepseek-harness
+        run: |
+          curl -fsSL -o /tmp/fnpack https://static2.fnnas.com/fnpack/fnpack-1.2.1-linux-amd64
+          chmod +x /tmp/fnpack
+          /tmp/fnpack build --directory .
+          VERSION="${{ steps.version.outputs.version }}"
+          FPKN=$(ls *.fpk)
+          mv "$FPKN" "deepseek-harness_${VERSION}_x86.fpk"
+          echo "✅ 构建完成: $(ls -lh *.fpk)"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: fpk-x86
+          path: deepseek-harness/*.fpk
           if-no-files-found: error
 
   release:
-    needs: build
+    name: 创建 Release
+    needs: [build-arm, build-x86]
+    if: always() && (needs.build-arm.result == 'success' || needs.build-x86.result == 'success')
     runs-on: ubuntu-latest
-    if: always() && needs.build.result == 'success'
     permissions:
       contents: write
     steps:
@@ -122,20 +179,23 @@ jobs:
       - name: 下载所有 FPK
         uses: actions/download-artifact@v4
         with:
-          path: ./artifacts/
+          path: artifacts
 
       - name: 获取版本号
         id: version
         run: |
           MANIFEST_VER=$(grep '^version' deepseek-harness/manifest | awk -F'=' '{print $2}' | tr -d ' ')
           echo "version=$MANIFEST_VER" >> $GITHUB_OUTPUT
+          mkdir -p release
+          find artifacts -name "*.fpk" -exec cp {} release/ \;
+          ls -lh release/
 
       - name: 创建 Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.version.outputs.version }}
           name: "DeepSeek Harness v${{ steps.version.outputs.version }}"
-          files: ./artifacts/**/*.fpk
+          files: release/*.fpk
           generate_release_notes: false
           body: |
             ## DeepSeek Harness v${{ steps.version.outputs.version }}
