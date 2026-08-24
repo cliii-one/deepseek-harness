@@ -18,10 +18,11 @@ permissions:
 
 jobs:
   build-arm:
-    name: Build ARM64 FPK
+    name: Build ARM64
     if: inputs.platform == 'arm' || inputs.platform == 'all'
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 60
+    outputs:
+      fpk_name: ${{ steps.build.outputs.fpk_name }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -31,26 +32,67 @@ jobs:
         with:
           node-version: 22
 
-      - name: Build App Package (ARM64)
+      - name: Build App Package
         env:
           TARBALL_ARCH: arm64
         run: bash scripts/build.sh
 
-      - name: Build FPK (ARM)
-        run: bash build-fpk.sh arm
+      - name: Get DSH Version
+        id: dsh
+        run: |
+          DSH_VER=$(tar -xzf app_arm64.tgz -O node_modules/@deepseek-ai/dsh/package.json 2>/dev/null | grep '"version"' | head -1 | sed 's/.*"version": *"\([^"]*\)".*/\1/')
+          if [ -z "$DSH_VER" ]; then
+            DSH_VER=$(npm view @deepseek-ai/dsh@latest version 2>/dev/null)
+          fi
+          echo "version=${DSH_VER}" >> $GITHUB_OUTPUT
+          echo "DSH版本: ${DSH_VER}"
 
-      - name: Upload ARM Artifact
+      - name: Build FPK
+        id: build
+        run: |
+          DSH_VER="${{ steps.dsh.outputs.version }}"
+          CHECKSUM=$(md5sum app_arm64.tgz | cut -d' ' -f1)
+          WORK_DIR=$(mktemp -d)
+          PKG="$WORK_DIR/package"
+
+          mkdir -p "$PKG/cmd"
+          cp app_arm64.tgz "$PKG/app.tgz"
+          cp -a deepseek-harness/cmd/.* "$PKG/cmd/" 2>/dev/null || cp -a deepseek-harness/cmd/. "$PKG/cmd/"
+          cp -a deepseek-harness/config "$PKG/config"
+          cp -a deepseek-harness/wizard "$PKG/"
+          cp deepseek-harness/*.sc "$PKG/" 2>/dev/null || true
+          cp deepseek-harness/ICON*.PNG "$PKG/"
+          cp -a deepseek-harness/app/ui "$PKG/"
+          [ -d "$PKG/ui/images" ] && [ -f "$PKG/ICON_256.PNG" ] && cp "$PKG/ICON_256.PNG" "$PKG/ui/images/256.png"
+
+          find "$PKG" -type d -exec chmod 755 {} +
+          find "$PKG" -type f -exec chmod 644 {} +
+          chmod -R 755 "$PKG/cmd" "$PKG/wizard"
+
+          cp deepseek-harness/manifest "$PKG/manifest"
+          sed -i "s/^version.*=.*/version               = ${DSH_VER}/" "$PKG/manifest"
+          sed -i "s/^platform.*=.*/platform              = arm/" "$PKG/manifest"
+          sed -i "s/^checksum.*=.*/checksum              = ${CHECKSUM}/" "$PKG/manifest"
+
+          FPK_NAME="deepseek-harness_${DSH_VER}_arm.fpk"
+          cd "$PKG" && tar --owner=0 --group=0 --numeric-owner -czf "$GITHUB_WORKSPACE/$FPK_NAME" *
+          cd "$GITHUB_WORKSPACE" && rm -rf "$WORK_DIR"
+          echo "fpk_name=${FPK_NAME}" >> $GITHUB_OUTPUT
+          echo "✅ Built: $FPK_NAME"
+
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: fpk-arm64
+          name: fpk-arm
           path: "*_arm.fpk"
           if-no-files-found: error
 
   build-x86:
-    name: Build x86_64 FPK
+    name: Build x86_64
     if: inputs.platform == 'x86' || inputs.platform == 'all'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    outputs:
+      fpk_name: ${{ steps.build.outputs.fpk_name }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -60,15 +102,55 @@ jobs:
         with:
           node-version: 22
 
-      - name: Build App Package (x86_64)
+      - name: Build App Package
         env:
           TARBALL_ARCH: amd64
         run: bash scripts/build.sh
 
-      - name: Build FPK (x86)
-        run: bash build-fpk.sh x86
+      - name: Get DSH Version
+        id: dsh
+        run: |
+          DSH_VER=$(tar -xzf app_amd64.tgz -O node_modules/@deepseek-ai/dsh/package.json 2>/dev/null | grep '"version"' | head -1 | sed 's/.*"version": *"\([^"]*\)".*/\1/')
+          if [ -z "$DSH_VER" ]; then
+            DSH_VER=$(npm view @deepseek-ai/dsh@latest version 2>/dev/null)
+          fi
+          echo "version=${DSH_VER}" >> $GITHUB_OUTPUT
+          echo "DSH版本: ${DSH_VER}"
 
-      - name: Upload x86 Artifact
+      - name: Build FPK
+        id: build
+        run: |
+          DSH_VER="${{ steps.dsh.outputs.version }}"
+          CHECKSUM=$(md5sum app_amd64.tgz | cut -d' ' -f1)
+          WORK_DIR=$(mktemp -d)
+          PKG="$WORK_DIR/package"
+
+          mkdir -p "$PKG/cmd"
+          cp app_amd64.tgz "$PKG/app.tgz"
+          cp -a deepseek-harness/cmd/.* "$PKG/cmd/" 2>/dev/null || cp -a deepseek-harness/cmd/. "$PKG/cmd/"
+          cp -a deepseek-harness/config "$PKG/config"
+          cp -a deepseek-harness/wizard "$PKG/"
+          cp deepseek-harness/*.sc "$PKG/" 2>/dev/null || true
+          cp deepseek-harness/ICON*.PNG "$PKG/"
+          cp -a deepseek-harness/app/ui "$PKG/"
+          [ -d "$PKG/ui/images" ] && [ -f "$PKG/ICON_256.PNG" ] && cp "$PKG/ICON_256.PNG" "$PKG/ui/images/256.png"
+
+          find "$PKG" -type d -exec chmod 755 {} +
+          find "$PKG" -type f -exec chmod 644 {} +
+          chmod -R 755 "$PKG/cmd" "$PKG/wizard"
+
+          cp deepseek-harness/manifest "$PKG/manifest"
+          sed -i "s/^version.*=.*/version               = ${DSH_VER}/" "$PKG/manifest"
+          sed -i "s/^platform.*=.*/platform              = x86/" "$PKG/manifest"
+          sed -i "s/^checksum.*=.*/checksum              = ${CHECKSUM}/" "$PKG/manifest"
+
+          FPK_NAME="deepseek-harness_${DSH_VER}_x86.fpk"
+          cd "$PKG" && tar --owner=0 --group=0 --numeric-owner -czf "$GITHUB_WORKSPACE/$FPK_NAME" *
+          cd "$GITHUB_WORKSPACE" && rm -rf "$WORK_DIR"
+          echo "fpk_name=${FPK_NAME}" >> $GITHUB_OUTPUT
+          echo "✅ Built: $FPK_NAME"
+
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: fpk-x86
@@ -94,12 +176,8 @@ jobs:
         run: |
           MANIFEST_VER=$(grep "^version" deepseek-harness/manifest | awk -F'=' '{print $2}' | tr -d ' ')
           echo "version=${MANIFEST_VER}" >> $GITHUB_OUTPUT
-          echo "版本: ${MANIFEST_VER}"
-          
-          # 收集FPK文件
           mkdir -p release
           find artifacts -name "*.fpk" -exec cp {} release/ \;
-          echo "Release文件:"
           ls -lh release/
 
       - name: Create Release
