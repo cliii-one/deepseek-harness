@@ -1,24 +1,17 @@
 name: Build DeepSeek Harness FPK
 
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
-      dsh_version:
-        description: 'DSH npm版本 (留空则自动获取最新版本)'
-        required: false
-        default: ''
       platform:
         description: '目标架构'
         required: true
-        default: 'both'
+        default: 'arm'
         type: choice
         options:
-          - both
-          - x86
           - arm
+          - x86
+          - both
 
 permissions:
   contents: write
@@ -39,35 +32,28 @@ jobs:
 
       - name: Build App Package
         env:
-          VERSION: ${{ inputs.dsh_version }}
           TARBALL_ARCH: amd64
         run: bash scripts/build.sh
 
       - name: Build FPK (x86)
         if: inputs.platform == 'both' || inputs.platform == 'x86'
-        run: bash build-fpk.sh "${{ inputs.dsh_version }}" x86
+        run: bash build-fpk.sh "" x86
 
       - name: Build FPK (ARM)
         if: inputs.platform == 'both' || inputs.platform == 'arm'
-        run: bash build-fpk.sh "${{ inputs.dsh_version }}" arm
+        run: bash build-fpk.sh "" arm
 
       - name: Get DSH Version
         id: version
         run: |
           # 从构建产物中获取实际使用的DSH版本
           if [ -f app_amd64.tgz ]; then
-            # 从app.tgz中提取package.json获取版本
             DSH_VER=$(tar -xzf app_amd64.tgz -O node_modules/@deepseek-ai/dsh/package.json 2>/dev/null | grep '"version"' | head -1 | sed 's/.*"version": *"\([^"]*\)".*/\1/')
           fi
           
           # 如果无法从包中获取，尝试从npm查询
           if [ -z "$DSH_VER" ]; then
             DSH_VER=$(npm view @deepseek-ai/dsh dist-tags.next 2>/dev/null || npm view @deepseek-ai/dsh@latest version 2>/dev/null || echo "")
-          fi
-          
-          # 如果还是空，使用manifest版本
-          if [ -z "$DSH_VER" ]; then
-            DSH_VER=$(grep "^version" deepseek-harness/manifest | awk -F'=' '{print $2}' | tr -d ' ')
           fi
           
           echo "dsh_version=${DSH_VER}" >> $GITHUB_OUTPUT
