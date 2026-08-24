@@ -30,12 +30,14 @@ jobs:
         with:
           node-version: 22
 
+      # build.sh 内部完成：下载Node → npm install DSH → 补丁patch.py → 输出 app_arm64.tgz
       - name: 构建 App 包
         working-directory: scripts
         env:
           TARBALL_ARCH: arm64
         run: bash build.sh
 
+      # 从 build.sh 产出的 app.tgz 中提取实际 DSH 版本号
       - name: 获取 DSH 版本号
         id: version
         run: |
@@ -46,6 +48,7 @@ jobs:
           echo "version=$DSH_VER" >> $GITHUB_OUTPUT
           echo "DSH版本: $DSH_VER"
 
+      # 更新 manifest 中的 version 和 platform
       - name: 更新 manifest
         working-directory: deepseek-harness
         run: |
@@ -61,18 +64,12 @@ jobs:
             [ -f "$f" ] && sed -i 's/\r$//' "$f" && chmod +x "$f"
           done
 
-      - name: 打包 app.tgz
-        run: |
-          python3 -c "
-          import tarfile, os
-          with tarfile.open('app.tgz', 'w:gz') as tar:
-              for root, dirs, files in os.walk('deepseek-harness/app'):
-                  for f in files:
-                      full = os.path.join(root, f)
-                      tar.add(full, arcname=os.path.relpath(full, 'deepseek-harness/app'))
-          "
-          mv app.tgz deepseek-harness/
+      # build.sh 已经生成了完整的 app_arm64.tgz（含Node+DSH+补丁+runner+ui）
+      # 直接复制为 fnpack 需要的 app.tgz，不重新打包
+      - name: 准备 app.tgz
+        run: cp app_arm64.tgz deepseek-harness/app.tgz
 
+      # fnpack 读取 deepseek-harness/ 目录生成 FPK
       - name: 下载 fnpack 并打包
         working-directory: deepseek-harness
         run: |
@@ -135,17 +132,8 @@ jobs:
             [ -f "$f" ] && sed -i 's/\r$//' "$f" && chmod +x "$f"
           done
 
-      - name: 打包 app.tgz
-        run: |
-          python3 -c "
-          import tarfile, os
-          with tarfile.open('app.tgz', 'w:gz') as tar:
-              for root, dirs, files in os.walk('deepseek-harness/app'):
-                  for f in files:
-                      full = os.path.join(root, f)
-                      tar.add(full, arcname=os.path.relpath(full, 'deepseek-harness/app'))
-          "
-          mv app.tgz deepseek-harness/
+      - name: 准备 app.tgz
+        run: cp app_amd64.tgz deepseek-harness/app.tgz
 
       - name: 下载 fnpack 并打包
         working-directory: deepseek-harness
