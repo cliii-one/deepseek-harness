@@ -13,6 +13,28 @@ APP_DIR="$REPO_ROOT/deepseek-harness"
 VERSION="${1:-}"
 PLATFORM="${2:-x86}"
 
+# 如果VERSION为空，从app.tgz中自动获取DSH版本
+if [ -z "$VERSION" ] && [ -f "$TAR_FILE" ]; then
+    VERSION=$(tar -xzf "$TAR_FILE" -O node_modules/@deepseek-ai/dsh/package.json 2>/dev/null | grep '"version"' | head -1 | sed 's/.*"version": *"\([^"]*\)".*/\1/' || true)
+    if [ -n "$VERSION" ]; then
+        echo "从app.tgz获取DSH版本: ${VERSION}"
+    fi
+fi
+
+# 如果还是空，尝试从npm查询
+if [ -z "$VERSION" ]; then
+    VERSION=$(npm view @deepseek-ai/dsh dist-tags.next 2>/dev/null || npm view @deepseek-ai/dsh@latest version 2>/dev/null || true)
+    if [ -n "$VERSION" ]; then
+        echo "从npm获取最新版本: ${VERSION}"
+    fi
+fi
+
+# 最后回退到manifest中的版本
+if [ -z "$VERSION" ]; then
+    VERSION=$(grep "^version" "$APP_DIR/manifest" | awk -F'=' '{print $2}' | tr -d ' ')
+    echo "使用manifest版本: ${VERSION}"
+fi
+
 case "$PLATFORM" in
     x86|x86_64|amd64)
         NORM_PLATFORM="x86"
