@@ -1,27 +1,19 @@
 #!/bin/bash
 
-APPNAME="deepseek-harness"
+APPNAME="${TRIM_APPNAME:-deepseek-harness}"
 
 # 服务端口定义（与 manifest 的 service_port、runner.js 保持一致）
-SERVICE_PORT=3080
+SERVICE_PORT="${TRIM_SERVICE_PORT:-3080}"
 INTERNAL_PORT=3081
 PORT_PATTERN=":(${SERVICE_PORT}|${INTERNAL_PORT}) "
 
-# 自动推导应用与数据目录
-if [ -z "${TRIM_APPDEST:-}" ]; then
-    if [ -e "/var/apps/${APPNAME}/target" ]; then
-        TRIM_APPDEST=$(readlink -f "/var/apps/${APPNAME}/target" 2>/dev/null || echo "/var/apps/${APPNAME}/target")
-    else
-        TRIM_APPDEST="/vol1/@appcenter/${APPNAME}"
-    fi
-fi
+# 使用飞牛标准环境变量
+TRIM_APPDEST="${TRIM_APPDEST:-}"
+TRIM_PKGVAR="${TRIM_PKGVAR:-}"
 
-if [ -z "${TRIM_PKGVAR:-}" ]; then
-    if [ -e "/var/apps/${APPNAME}/var" ]; then
-        TRIM_PKGVAR=$(readlink -f "/var/apps/${APPNAME}/var" 2>/dev/null || echo "/var/apps/${APPNAME}/var")
-    else
-        TRIM_PKGVAR="/vol1/@appdata/${APPNAME}"
-    fi
+if [ -z "${TRIM_APPDEST}" ] || [ -z "${TRIM_PKGVAR}" ]; then
+    echo "ERROR: TRIM_APPDEST or TRIM_PKGVAR not set" >&2
+    exit 1
 fi
 
 mkdir -p "${TRIM_PKGVAR}" 2>/dev/null || true

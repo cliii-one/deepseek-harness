@@ -23,10 +23,13 @@ const DSH_PORT = parseInt(process.env.DSH_PORT || '3081', 10);
 // DSH 的可编辑设置、凭据和插件 profile 都由 HOME 下的 .dsh 管理。
 // 先确定飞牛工作区，才能在启动前安全迁移旧配置。
 let WORKSPACE_DIR = VAR_DIR;
-if (fs.existsSync('/vol1/@appshare/DeepSeekHarness')) {
-    WORKSPACE_DIR = '/vol1/@appshare/DeepSeekHarness';
-} else if (fs.existsSync('/vol1')) {
-    WORKSPACE_DIR = '/vol1';
+// 优先使用飞牛声明的数据共享目录
+const TRIM_SHARES = process.env.TRIM_DATA_SHARE_PATHS || '';
+if (TRIM_SHARES) {
+    const firstShare = TRIM_SHARES.split(':')[0];
+    if (firstShare && fs.existsSync(firstShare)) {
+        WORKSPACE_DIR = firstShare;
+    }
 }
 
 // 确保 umask 为 0，使 DSH 创建的文件与目录对宿主机 NAS 用户及 SMB 保持完全可读写
