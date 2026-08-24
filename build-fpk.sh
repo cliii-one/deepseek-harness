@@ -2,16 +2,28 @@
 set -euo pipefail
 
 # Build .fpk for DeepSeek Harness
-# Usage: bash build-fpk.sh [version] [platform]
-#   version  - override version (default: from manifest)
-#   platform - x86 | arm (default: x86)
+# Usage: bash build-fpk.sh [platform]
+#   platform - x86 | arm (default: from manifest)
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$SCRIPT_DIR"
 APP_DIR="$REPO_ROOT/deepseek-harness"
 
-VERSION="${1:-}"
-PLATFORM="${2:-x86}"
+PLATFORM="${1:-}"
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; NC='\033[0m'
+info() { echo -e "${GREEN}[INFO]${NC} $1"; }
+error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+
+[ -d "$APP_DIR" ] || error "App directory not found: $APP_DIR"
+
+# 从manifest读取appname和platform
+APPNAME=$(grep "^appname" "$APP_DIR/manifest" | awk -F'=' '{print $2}' | tr -d ' ')
+[ -n "$APPNAME" ] || error "Cannot read appname from manifest"
+
+if [ -z "$PLATFORM" ]; then
+    PLATFORM=$(grep "^platform" "$APP_DIR/manifest" | awk -F'=' '{print $2}' | tr -d ' ')
+fi
 
 case "$PLATFORM" in
     x86|x86_64|amd64)
@@ -23,43 +35,15 @@ case "$PLATFORM" in
         TAR_FILE="${REPO_ROOT}/app_arm64.tgz"
         ;;
     *)
-        NORM_PLATFORM="$PLATFORM"
-        TAR_FILE="${REPO_ROOT}/app_${PLATFORM}.tgz"
+        error "Unknown platform: $PLATFORM (use x86 or arm)"
         ;;
 esac
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; NC='\033[0m'
-info() { echo -e "${GREEN}[INFO]${NC} $1"; }
-error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
-
 if [ ! -f "$TAR_FILE" ] && [ -f "${REPO_ROOT}/app.tgz" ]; then
-    echo -e "${RED}[WARN]${NC} 未找到 ${TAR_FILE##*/}，回退到 app.tgz——请确认其架构与目标平台一致！"
+    echo -e "${RED}[WARN]${NC} 未找到 ${TAR_FILE##*/}，回退到 app.tgz"
     TAR_FILE="${REPO_ROOT}/app.tgz"
 fi
 
-# 如果VERSION为空，从app.tgz中自动获取DSH版本
-if [ -z "$VERSION" ] && [ -f "$TAR_FILE" ]; then
-    VERSION=$(tar -xzf "$TAR_FILE" -O node_modules/@deepseek-ai/dsh/package.json 2>/dev/null | grep '"version"' | head -1 | sed 's/.*"version": *"\([^"]*\)".*/\1/' || true)
-    if [ -n "$VERSION" ]; then
-        echo "从app.tgz获取DSH版本: ${VERSION}"
-    fi
-fi
-
-# 如果还是空，尝试从npm查询
-if [ -z "$VERSION" ]; then
-    VERSION=$(npm view @deepseek-ai/dsh dist-tags.next 2>/dev/null || npm view @deepseek-ai/dsh@latest version 2>/dev/null || true)
-    if [ -n "$VERSION" ]; then
-        echo "从npm获取最新版本: ${VERSION}"
-    fi
-fi
-
-# 最后回退到manifest中的版本
-if [ -z "$VERSION" ]; then
-    VERSION=$(grep "^version" "$APP_DIR/manifest" | awk -F'=' '{print $2}' | tr -d ' ')
-    echo "使用manifest版本: ${VERSION}"
-fi
-
-[ -d "$APP_DIR" ] || error "App directory not found: $APP_DIR"
 [ -f "$TAR_FILE" ] || error "Target archive not found: $TAR_FILE — run build.sh first"
 
 # Validate required files
@@ -67,10 +51,6 @@ for f in manifest cmd config ICON.PNG ICON_256.PNG; do
     [ -e "$APP_DIR/$f" ] || error "Missing: $APP_DIR/$f"
 done
 [ -d "$APP_DIR/app/ui" ] || error "Missing app/ui/ directory"
-
-# Read appname
-APPNAME=$(grep "^appname[[:space:]]*=" "$APP_DIR/manifest" | awk -F'=' '{print $2}' | tr -d ' ')
-[ -n "$APPNAME" ] || error "Cannot read appname from manifest"
 
 info "Building fpk for: $APPNAME (platform: $NORM_PLATFORM)"
 
@@ -115,16 +95,8 @@ if [ -d "$PKG_DIR/wizard" ]; then
     chmod -R 755 "$PKG_DIR/wizard"
 fi
 
-# 9. manifest (更新版本、平台、校验和)
+# 9. manifest (直接复制，只更新checksum)
 cp "$APP_DIR/manifest" "$PKG_DIR/manifest"
-if [ -n "$VERSION" ]; then
-    sed -i.tmp "s/^version.*=.*/version               = ${VERSION}/" "$PKG_DIR/manifest"
-fi
-if grep -q "^platform" "$PKG_DIR/manifest"; then
-    sed -i.tmp "s/^platform.*=.*/platform              = ${NORM_PLATFORM}/" "$PKG_DIR/manifest"
-else
-    echo "platform              = ${NORM_PLATFORM}" >> "$PKG_DIR/manifest"
-fi
 sed -i.tmp "s/^checksum.*=.*/checksum              = ${CHECKSUM}/" "$PKG_DIR/manifest"
 rm -f "$PKG_DIR/manifest.tmp"
 

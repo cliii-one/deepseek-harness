@@ -1,0 +1,13 @@
+#!/bin/bash
+
+### This script is called before the user uninstalls the application.
+
+# 清理残留进程
+pkill -9 -f "${TRIM_PKGVAR}" 2>/dev/null || true
+
+SHARE_PATH="${TRIM_DATA_SHARE_PATHS%%:*}"
+if [ -n "${SHARE_PATH}" ]; then
+    pkill -9 -f "${SHARE_PATH}" 2>/dev/null || true
+fi
+
+exit 0
