@@ -20,7 +20,7 @@ if [ -z "${NODE_VERSION}" ]; then
 fi
 
 # 默认自动解析官方 npm 的 next / latest 版本，网络不可达时兜底为 meta.env 中的值
-if [ -z "${VERSION:-}" ] || [ "${VERSION}" = "latest" ]; then
+if [ -z "${VERSION:-}" ] || [ "${VERSION}" = "latest" ] || [ "${VERSION}" = "" ]; then
     RESOLVED_VER=$(npm view @deepseek-ai/dsh dist-tags.next 2>/dev/null || true)
     if [ -z "$RESOLVED_VER" ]; then
         RESOLVED_VER=$(npm view @deepseek-ai/dsh@latest version 2>/dev/null || echo "${DSH_FALLBACK_VERSION}")
