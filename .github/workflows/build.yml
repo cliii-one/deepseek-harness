@@ -17,8 +17,38 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    name: Build FPK Package
+  build-arm:
+    name: Build ARM64 FPK
+    if: inputs.platform == 'arm' || inputs.platform == 'all'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build App Package (ARM64)
+        env:
+          TARBALL_ARCH: arm64
+        run: bash scripts/build.sh
+
+      - name: Build FPK (ARM)
+        run: bash build-fpk.sh "" arm
+
+      - name: Upload ARM Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fpk-arm64
+          path: "*_arm.fpk"
+          if-no-files-found: error
+
+  build-x86:
+    name: Build x86_64 FPK
+    if: inputs.platform == 'x86' || inputs.platform == 'all'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -30,52 +60,65 @@ jobs:
         with:
           node-version: 22
 
-      - name: Build App Package
+      - name: Build App Package (x86_64)
         env:
           TARBALL_ARCH: amd64
         run: bash scripts/build.sh
 
       - name: Build FPK (x86)
-        if: inputs.platform == 'all' || inputs.platform == 'x86'
         run: bash build-fpk.sh "" x86
 
-      - name: Build FPK (ARM)
-        if: inputs.platform == 'all' || inputs.platform == 'arm'
-        run: bash build-fpk.sh "" arm
+      - name: Upload x86 Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fpk-x86
+          path: "*_x86.fpk"
+          if-no-files-found: error
+
+  release:
+    name: Create Release
+    needs: [build-arm, build-x86]
+    if: always() && (needs.build-arm.result == 'success' || needs.build-x86.result == 'success')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
 
       - name: Get DSH Version
         id: version
         run: |
-          # 从构建产物中获取实际使用的DSH版本
-          if [ -f app_amd64.tgz ]; then
-            DSH_VER=$(tar -xzf app_amd64.tgz -O node_modules/@deepseek-ai/dsh/package.json 2>/dev/null | grep '"version"' | head -1 | sed 's/.*"version": *"\([^"]*\)".*/\1/')
+          # 从app.tgz中提取DSH版本
+          if [ -f artifacts/fpk-arm64/app_amd64.tgz ]; then
+            DSH_VER=$(tar -xzf artifacts/fpk-arm64/app_amd64.tgz -O node_modules/@deepseek-ai/dsh/package.json 2>/dev/null | grep '"version"' | head -1 | sed 's/.*"version": *"\([^"]*\)".*/\1/')
+          elif [ -f artifacts/fpk-x86/app_amd64.tgz ]; then
+            DSH_VER=$(tar -xzf artifacts/fpk-x86/app_amd64.tgz -O node_modules/@deepseek-ai/dsh/package.json 2>/dev/null | grep '"version"' | head -1 | sed 's/.*"version": *"\([^"]*\)".*/\1/')
           fi
           
-          # 如果无法从包中获取，尝试从npm查询
+          # 从npm查询
           if [ -z "$DSH_VER" ]; then
-            DSH_VER=$(npm view @deepseek-ai/dsh dist-tags.next 2>/dev/null || npm view @deepseek-ai/dsh@latest version 2>/dev/null || echo "")
+            DSH_VER=$(npm view @deepseek-ai/dsh dist-tags.next 2>/dev/null || npm view @deepseek-ai/dsh@latest version 2>/dev/null)
           fi
           
           echo "dsh_version=${DSH_VER}" >> $GITHUB_OUTPUT
           echo "DSH版本: ${DSH_VER}"
           
-          # 列出构建产物
-          echo "构建产物:"
-          ls -lh *.fpk 2>/dev/null || echo "无FPK产物"
-
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: deepseek-harness-${{ steps.version.outputs.dsh_version }}
-          path: "*.fpk"
-          if-no-files-found: warn
+          # 收集FPK文件
+          mkdir -p release
+          find artifacts -name "*.fpk" -exec cp {} release/ \;
+          echo "Release文件:"
+          ls -lh release/
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.version.outputs.dsh_version }}
           name: "DeepSeek Harness v${{ steps.version.outputs.dsh_version }}"
-          files: "*.fpk"
+          files: release/*.fpk
           draft: false
           prerelease: false
           generate_release_notes: true
