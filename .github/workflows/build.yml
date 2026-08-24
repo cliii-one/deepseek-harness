@@ -17,185 +17,145 @@ permissions:
   contents: write
 
 jobs:
-  build-arm:
-    name: Build ARM64
-    if: inputs.platform == 'arm' || inputs.platform == 'all'
-    runs-on: ubuntu-24.04-arm
-    outputs:
-      fpk_name: ${{ steps.build.outputs.fpk_name }}
+  build:
+    runs-on: ${{ matrix.runner }}
+    name: 构建 ${{ matrix.arch }}
+    strategy:
+      matrix:
+        include: ${{ fromJSON(
+          inputs.platform == 'all' && '[{"arch":"arm64","runner":"ubuntu-24.04-arm","fnpack_platform":"arm"},{"arch":"x86_64","runner":"ubuntu-latest","fnpack_platform":"x86"}]' ||
+          inputs.platform == 'arm' && '[{"arch":"arm64","runner":"ubuntu-24.04-arm","fnpack_platform":"arm"}]' ||
+          '[{"arch":"x86_64","runner":"ubuntu-latest","fnpack_platform":"x86"}]'
+        ) }}
+
+    defaults:
+      run:
+        working-directory: deepseek-harness
+
     steps:
-      - name: Checkout Code
+      - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: 设置 Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
 
-      - name: Build App Package
+      - name: 构建 App 包
+        working-directory: scripts
         env:
-          TARBALL_ARCH: arm64
-        run: bash scripts/build.sh
+          TARBALL_ARCH: ${{ matrix.arch }}
+        run: bash build.sh
 
-      - name: Get DSH Version
-        id: dsh
+      - name: 确定 DSH 版本号
+        id: version
         run: |
-          DSH_VER=$(tar -xzf app_arm64.tgz -O node_modules/@deepseek-ai/dsh/package.json 2>/dev/null | grep '"version"' | head -1 | sed 's/.*"version": *"\([^"]*\)".*/\1/')
+          DSH_VER=$(tar -xzf ../app_${{ matrix.arch }}.tgz -O node_modules/@deepseek-ai/dsh/package.json 2>/dev/null | grep '"version"' | head -1 | sed 's/.*"version": *"\([^"]*\)".*/\1/')
           if [ -z "$DSH_VER" ]; then
             DSH_VER=$(npm view @deepseek-ai/dsh@latest version 2>/dev/null)
           fi
-          echo "version=${DSH_VER}" >> $GITHUB_OUTPUT
-          echo "DSH版本: ${DSH_VER}"
+          echo "version=$DSH_VER" >> $GITHUB_OUTPUT
+          echo "DSH版本: $DSH_VER"
 
-      - name: Build FPK
-        id: build
+      - name: 更新 manifest
         run: |
-          DSH_VER="${{ steps.dsh.outputs.version }}"
-          CHECKSUM=$(md5sum app_arm64.tgz | cut -d' ' -f1)
-          WORK_DIR=$(mktemp -d)
-          PKG="$WORK_DIR/package"
+          VERSION="${{ steps.version.outputs.version }}"
+          PLATFORM="${{ matrix.fnpack_platform }}"
+          sed -i "s/^version.*/version               = ${VERSION}/" manifest
+          sed -i "s/^platform.*/platform              = ${PLATFORM}/" manifest
+          echo "=== manifest ===" && cat manifest
 
-          mkdir -p "$PKG/cmd"
-          cp app_arm64.tgz "$PKG/app.tgz"
-          cp -a deepseek-harness/cmd/.* "$PKG/cmd/" 2>/dev/null || cp -a deepseek-harness/cmd/. "$PKG/cmd/"
-          cp -a deepseek-harness/config "$PKG/config"
-          cp -a deepseek-harness/wizard "$PKG/"
-          cp deepseek-harness/*.sc "$PKG/" 2>/dev/null || true
-          cp deepseek-harness/ICON*.PNG "$PKG/"
-          cp -a deepseek-harness/app/ui "$PKG/"
-          [ -d "$PKG/ui/images" ] && [ -f "$PKG/ICON_256.PNG" ] && cp "$PKG/ICON_256.PNG" "$PKG/ui/images/256.png"
+      - name: 修复脚本权限
+        run: |
+          for f in cmd/* wizard/*; do
+            [ -f "$f" ] && sed -i 's/\r$//' "$f" && chmod +x "$f"
+          done
 
-          find "$PKG" -type d -exec chmod 755 {} +
-          find "$PKG" -type f -exec chmod 644 {} +
-          chmod -R 755 "$PKG/cmd" "$PKG/wizard"
+      - name: 打包 FPK
+        run: |
+          cd ..
+          VERSION="${{ steps.version.outputs.version }}"
+          PLATFORM="${{ matrix.fnpack_platform }}"
+          FPK_NAME="deepseek-harness_${VERSION}_${PLATFORM}.fpk"
+          PKG="deepseek-harness"
 
-          cp deepseek-harness/manifest "$PKG/manifest"
-          sed -i "s/^version.*=.*/version               = ${DSH_VER}/" "$PKG/manifest"
-          sed -i "s/^platform.*=.*/platform              = arm/" "$PKG/manifest"
-          sed -i "s/^checksum.*=.*/checksum              = ${CHECKSUM}/" "$PKG/manifest"
+          # 先把 app/ 目录打包成 app.tgz
+          python3 -c "
+          import tarfile, os
+          with tarfile.open('app.tgz', 'w:gz') as tar:
+              for root, dirs, files in os.walk('${PKG}/app'):
+                  for f in files:
+                      full = os.path.join(root, f)
+                      tar.add(full, arcname=os.path.relpath(full, '${PKG}/app'))
+          "
 
-          FPK_NAME="deepseek-harness_${DSH_VER}_arm.fpk"
-          cd "$PKG" && tar --owner=0 --group=0 --numeric-owner -czf "$GITHUB_WORKSPACE/$FPK_NAME" *
-          cd "$GITHUB_WORKSPACE" && rm -rf "$WORK_DIR"
-          echo "fpk_name=${FPK_NAME}" >> $GITHUB_OUTPUT
-          echo "✅ Built: $FPK_NAME"
+          # 复制一份需要的文件到临时目录
+          TMP=$(mktemp -d)
+          cp "${PKG}/manifest" "$TMP/"
+          cp "${PKG}/ICON.PNG" "$TMP/"
+          cp "${PKG}/ICON_256.PNG" "$TMP/"
+          cp "${PKG}/DeepSeekHarness.sc" "$TMP/" 2>/dev/null || true
+          cp -a "${PKG}/cmd" "$TMP/"
+          cp -a "${PKG}/config" "$TMP/"
+          cp -a "${PKG}/wizard" "$TMP/"
+          cp -a "${PKG}/app/ui" "$TMP/ui"
+          cp app.tgz "$TMP/"
 
-      - name: Upload
+          # 打包 FPK（所有文件在根目录）
+          cd "$TMP"
+          tar -cf "../${FPK_NAME}" manifest ICON.PNG ICON_256.PNG cmd/ config/ wizard/ ui/ app.tgz
+          cd ..
+          gzip -1 "${FPK_NAME}"
+          mv "${FPK_NAME}.gz" "${FPK_NAME}"
+          rm -rf "$TMP" app.tgz
+
+          echo "✅ 构建完成: $(ls -h ${FPK_NAME})"
+
+      - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: fpk-arm
-          path: "*_arm.fpk"
-          if-no-files-found: error
-
-  build-x86:
-    name: Build x86_64
-    if: inputs.platform == 'x86' || inputs.platform == 'all'
-    runs-on: ubuntu-latest
-    outputs:
-      fpk_name: ${{ steps.build.outputs.fpk_name }}
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - name: Build App Package
-        env:
-          TARBALL_ARCH: amd64
-        run: bash scripts/build.sh
-
-      - name: Get DSH Version
-        id: dsh
-        run: |
-          DSH_VER=$(tar -xzf app_amd64.tgz -O node_modules/@deepseek-ai/dsh/package.json 2>/dev/null | grep '"version"' | head -1 | sed 's/.*"version": *"\([^"]*\)".*/\1/')
-          if [ -z "$DSH_VER" ]; then
-            DSH_VER=$(npm view @deepseek-ai/dsh@latest version 2>/dev/null)
-          fi
-          echo "version=${DSH_VER}" >> $GITHUB_OUTPUT
-          echo "DSH版本: ${DSH_VER}"
-
-      - name: Build FPK
-        id: build
-        run: |
-          DSH_VER="${{ steps.dsh.outputs.version }}"
-          CHECKSUM=$(md5sum app_amd64.tgz | cut -d' ' -f1)
-          WORK_DIR=$(mktemp -d)
-          PKG="$WORK_DIR/package"
-
-          mkdir -p "$PKG/cmd"
-          cp app_amd64.tgz "$PKG/app.tgz"
-          cp -a deepseek-harness/cmd/.* "$PKG/cmd/" 2>/dev/null || cp -a deepseek-harness/cmd/. "$PKG/cmd/"
-          cp -a deepseek-harness/config "$PKG/config"
-          cp -a deepseek-harness/wizard "$PKG/"
-          cp deepseek-harness/*.sc "$PKG/" 2>/dev/null || true
-          cp deepseek-harness/ICON*.PNG "$PKG/"
-          cp -a deepseek-harness/app/ui "$PKG/"
-          [ -d "$PKG/ui/images" ] && [ -f "$PKG/ICON_256.PNG" ] && cp "$PKG/ICON_256.PNG" "$PKG/ui/images/256.png"
-
-          find "$PKG" -type d -exec chmod 755 {} +
-          find "$PKG" -type f -exec chmod 644 {} +
-          chmod -R 755 "$PKG/cmd" "$PKG/wizard"
-
-          cp deepseek-harness/manifest "$PKG/manifest"
-          sed -i "s/^version.*=.*/version               = ${DSH_VER}/" "$PKG/manifest"
-          sed -i "s/^platform.*=.*/platform              = x86/" "$PKG/manifest"
-          sed -i "s/^checksum.*=.*/checksum              = ${CHECKSUM}/" "$PKG/manifest"
-
-          FPK_NAME="deepseek-harness_${DSH_VER}_x86.fpk"
-          cd "$PKG" && tar --owner=0 --group=0 --numeric-owner -czf "$GITHUB_WORKSPACE/$FPK_NAME" *
-          cd "$GITHUB_WORKSPACE" && rm -rf "$WORK_DIR"
-          echo "fpk_name=${FPK_NAME}" >> $GITHUB_OUTPUT
-          echo "✅ Built: $FPK_NAME"
-
-      - name: Upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: fpk-x86
-          path: "*_x86.fpk"
+          name: fpk-${{ matrix.fnpack_platform }}
+          path: "deepseek-harness_*.fpk"
           if-no-files-found: error
 
   release:
-    name: Create Release
-    needs: [build-arm, build-x86]
-    if: always() && (needs.build-arm.result == 'success' || needs.build-x86.result == 'success')
+    needs: build
     runs-on: ubuntu-latest
+    if: always() && needs.build.result == 'success'
+    permissions:
+      contents: write
     steps:
-      - name: Checkout Code
+      - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: Download All Artifacts
+      - name: 下载所有 FPK
         uses: actions/download-artifact@v4
         with:
-          path: artifacts
+          path: ./artifacts/
 
-      - name: Get Version
+      - name: 获取版本号
         id: version
         run: |
-          MANIFEST_VER=$(grep "^version" deepseek-harness/manifest | awk -F'=' '{print $2}' | tr -d ' ')
-          echo "version=${MANIFEST_VER}" >> $GITHUB_OUTPUT
-          mkdir -p release
-          find artifacts -name "*.fpk" -exec cp {} release/ \;
-          ls -lh release/
+          MANIFEST_VER=$(grep '^version' deepseek-harness/manifest | awk -F'=' '{print $2}' | tr -d ' ')
+          echo "version=$MANIFEST_VER" >> $GITHUB_OUTPUT
 
-      - name: Create Release
+      - name: 创建 Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.version.outputs.version }}
           name: "DeepSeek Harness v${{ steps.version.outputs.version }}"
-          files: release/*.fpk
-          draft: false
-          prerelease: false
-          generate_release_notes: true
+          files: ./artifacts/**/*.fpk
+          generate_release_notes: false
           body: |
             ## DeepSeek Harness v${{ steps.version.outputs.version }}
-            
-            ### 下载安装包
-            - **x86_64**: `deepseek-harness_${{ steps.version.outputs.version }}_x86.fpk`
-            - **ARM64**: `deepseek-harness_${{ steps.version.outputs.version }}_arm.fpk`
-            
+
+            ### 📦 下载
+
+            | 文件 | 架构 | 适用设备 |
+            |------|------|----------|
+            | `deepseek-harness_${{ steps.version.outputs.version }}_x86.fpk` | x86_64 | Intel/AMD NAS |
+            | `deepseek-harness_${{ steps.version.outputs.version }}_arm.fpk` | arm64 | ARM NAS |
+
             ### 安装方式
             1. 下载对应架构的 `.fpk` 文件
             2. 登录飞牛NAS桌面 → 应用中心 → 手动安装
