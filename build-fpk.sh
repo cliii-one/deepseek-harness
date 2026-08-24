@@ -8,8 +8,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$SCRIPT_DIR"
-APP_DIR="$REPO_ROOT/apps/deepseek-harness"
-SHARED_DIR="$REPO_ROOT/shared"
 
 VERSION="${1:-}"
 PLATFORM="${2:-x86}"
@@ -34,22 +32,21 @@ info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
 if [ ! -f "$TAR_FILE" ] && [ -f "${REPO_ROOT}/app.tgz" ]; then
-    # 回退到不带架构后缀的 app.tgz 有架构错位风险（它可能是另一架构最后一次构建的产物）
     echo -e "${RED}[WARN]${NC} 未找到 ${TAR_FILE##*/}，回退到 app.tgz——请确认其架构与目标平台一致！"
     TAR_FILE="${REPO_ROOT}/app.tgz"
 fi
 
-[ -d "$APP_DIR/fnos" ] || error "App directory not found: $APP_DIR/fnos"
+[ -f "$REPO_ROOT/manifest" ] || error "manifest not found in repo root"
 [ -f "$TAR_FILE" ] || error "Target archive not found: $TAR_FILE — run build.sh first"
 
 # Validate required files
 for f in manifest cmd config ICON.PNG ICON_256.PNG; do
-    [ -e "$APP_DIR/fnos/$f" ] || error "Missing: $APP_DIR/fnos/$f"
+    [ -e "$REPO_ROOT/$f" ] || error "Missing: $REPO_ROOT/$f"
 done
-[ -d "$APP_DIR/fnos/ui" ] || error "Missing ui/ directory"
+[ -d "$REPO_ROOT/app/ui" ] || error "Missing app/ui/ directory"
 
 # Read appname
-APPNAME=$(grep "^appname[[:space:]]*=" "$APP_DIR/fnos/manifest" | awk -F'=' '{print $2}' | tr -d ' ')
+APPNAME=$(grep "^appname[[:space:]]*=" "$REPO_ROOT/manifest" | awk -F'=' '{print $2}' | tr -d ' ')
 [ -n "$APPNAME" ] || error "Cannot read appname from manifest"
 
 info "Building fpk for: $APPNAME (platform: $NORM_PLATFORM)"
@@ -57,59 +54,37 @@ info "Building fpk for: $APPNAME (platform: $NORM_PLATFORM)"
 CHECKSUM=$(md5sum "$TAR_FILE" | cut -d' ' -f1)
 
 WORK_DIR=$(mktemp -d)
-# 中途失败也要清理临时目录（此前只有成功路径清理，set -e 失败会泄漏 /tmp 目录）
 trap 'rm -rf "$WORK_DIR"' EXIT
 PKG_DIR="$WORK_DIR/package"
 mkdir -p "$PKG_DIR/cmd"
 
-# 1. app.tgz
+# 1. app.tgz (应用运行文件: Node.js + DSH + runner.js)
 cp "$TAR_FILE" "$PKG_DIR/app.tgz"
 
-# 2. shared cmd framework
-for f in "$SHARED_DIR"/cmd/*; do
-    case "$(basename "$f")" in
-        *.md|*.MD) continue ;;
-    esac
-    cp "$f" "$PKG_DIR/cmd/"
-done
+# 2. cmd (生命周期脚本)
+cp -a "$REPO_ROOT/cmd/." "$PKG_DIR/cmd/"
 
-# 3. app-specific cmd overrides (service-setup)
-if [ -d "$APP_DIR/fnos/cmd" ]; then
-    cp -a "$APP_DIR/fnos/cmd/." "$PKG_DIR/cmd/"
+# 3. config (权限和资源声明)
+cp -a "$REPO_ROOT/config" "$PKG_DIR/config"
+
+# 4. wizard (安装向导)
+if [ -d "$REPO_ROOT/wizard" ]; then
+    cp -a "$REPO_ROOT/wizard" "$PKG_DIR/"
 fi
 
-# 4. config
-if [ -d "$APP_DIR/fnos/config" ]; then
-    cp -a "$APP_DIR/fnos/config" "$PKG_DIR/config"
-fi
+# 5. 防火墙配置
+cp "$REPO_ROOT"/*.sc "$PKG_DIR/" 2>/dev/null || true
 
-# 5. var seed
-if [ -d "$APP_DIR/var" ]; then
-    cp -a "$APP_DIR/var" "$PKG_DIR/"
-fi
+# 6. 图标
+cp "$REPO_ROOT"/ICON*.PNG "$PKG_DIR/" 2>/dev/null || true
 
-# 6. wizard (shared or app)
-if [ -d "$APP_DIR/fnos/wizard" ]; then
-    cp -a "$APP_DIR/fnos/wizard" "$PKG_DIR/"
-elif [ -d "$SHARED_DIR/wizard" ]; then
-    cp -a "$SHARED_DIR/wizard" "$PKG_DIR/"
-fi
-
-# 7. firewall sc
-cp "$APP_DIR"/fnos/*.sc "$PKG_DIR/" 2>/dev/null || true
-
-# 8. icons
-cp "$APP_DIR"/fnos/ICON*.PNG "$PKG_DIR/" 2>/dev/null || true
-
-# 9. ui
-if [ -d "$APP_DIR/fnos/ui" ]; then
-    cp -a "$APP_DIR/fnos/ui" "$PKG_DIR/"
-fi
+# 7. ui (桌面入口配置)
+cp -a "$REPO_ROOT/app/ui" "$PKG_DIR/"
 if [ -d "$PKG_DIR/ui/images" ] && [ -f "$PKG_DIR/ICON_256.PNG" ]; then
     cp "$PKG_DIR/ICON_256.PNG" "$PKG_DIR/ui/images/256.png"
 fi
 
-# 10. Ensure permissions for all directories and lifecycle scripts
+# 8. 设置权限
 find "$PKG_DIR" -type d -exec chmod 755 {} +
 find "$PKG_DIR" -type f -exec chmod 644 {} +
 chmod -R 755 "$PKG_DIR/cmd"
@@ -117,8 +92,8 @@ if [ -d "$PKG_DIR/wizard" ]; then
     chmod -R 755 "$PKG_DIR/wizard"
 fi
 
-# 11. manifest
-cp "$APP_DIR/fnos/manifest" "$PKG_DIR/manifest"
+# 9. manifest (更新版本、平台、校验和)
+cp "$REPO_ROOT/manifest" "$PKG_DIR/manifest"
 if [ -n "$VERSION" ]; then
     sed -i.tmp "s/^version.*/version         = ${VERSION}/" "$PKG_DIR/manifest"
 fi
@@ -130,12 +105,12 @@ fi
 sed -i.tmp "s/^checksum.*/checksum        = ${CHECKSUM}/" "$PKG_DIR/manifest"
 rm -f "$PKG_DIR/manifest.tmp"
 
-# Output name
+# 输出文件名
 MANIFEST_VERSION=$(grep "^version[[:space:]]*=" "$PKG_DIR/manifest" | awk -F'=' '{print $2}' | tr -d ' ')
 MANIFEST_PLATFORM=$(grep "^platform[[:space:]]*=" "$PKG_DIR/manifest" | awk -F'=' '{print $2}' | tr -d ' ')
 FPK_NAME="${APPNAME}_${MANIFEST_VERSION}_${MANIFEST_PLATFORM:-x86}.fpk"
 
-# 12. Create fpk
+# 10. 打包FPK
 cd "$PKG_DIR"
 [ -f "app.tgz" ] || error "app.tgz missing"
 [ -f "manifest" ] || error "manifest missing"
