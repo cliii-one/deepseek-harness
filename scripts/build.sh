@@ -95,25 +95,6 @@ echo "==> Bundling pnpm ${PNPM_VERSION} for DSH plugin management..."
 "${WORK_DIR}/node/bin/npm" install --global --prefix "${WORK_DIR}/app_root" "pnpm@${PNPM_VERSION}" --omit=dev --no-audit --no-fund
 test -x "${WORK_DIR}/app_root/bin/pnpm"
 
-# 3b. 预装 dsh-market 插件市场
-echo "==> Pre-installing dshmarket plugin..."
-# 将 dshmarket 安装到 profiles/node_modules 目录（DSH 加载插件的正确位置）
-mkdir -p "${WORK_DIR}/app_root/.dsh/profiles/node_modules"
-cd "${WORK_DIR}/app_root/.dsh/profiles"
-"${WORK_DIR}/node/bin/npm" init -y >/dev/null 2>&1
-"${WORK_DIR}/node/bin/npm" install "dshmarket@latest" --omit=dev --no-audit --no-fund 2>/dev/null || {
-    echo "⚠️ dshmarket npm 安装失败，将跳过预装"
-}
-
-# 创建 web profile 的初始配置（首次启动时 runner.js 会检查并注册）
-mkdir -p "${WORK_DIR}/app_root/.dsh/profiles/web"
-# 写入空的 cordis.patch.yml（runner.js 会在首次启动时注入 dsh-market）
-cat > "${WORK_DIR}/app_root/.dsh/profiles/web/cordis.patch.yml" << 'EOF'
-# Your patch layer for this dsh profile, applied after every bundle layer.
-[]
-EOF
-echo "✅ dshmarket 包已预装到 profiles/node_modules"
-
 # 复制 ui 目录和 runner 脚本至 app_root (解压后位于 ${TRIM_APPDEST})
 if [ -d "${REPO_ROOT}/deepseek-harness/app/ui" ]; then
     echo "==> Bundling desktop UI config..."

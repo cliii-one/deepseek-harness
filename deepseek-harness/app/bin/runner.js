@@ -49,67 +49,6 @@ function ensureWorkspacePermissions() {
 }
 ensureWorkspacePermissions();
 
-// 首次启动时，自动注册 dsh-market 插件到用户 profile
-function ensureDshMarketInstalled() {
-    const targetProfile = path.join(WORKSPACE_DIR, '.dsh', 'profiles', 'web');
-    const markerFile = path.join(targetProfile, '.dsh-market-initialized');
-    const patchFile = path.join(targetProfile, 'cordis.patch.yml');
-
-    try {
-        // 确保目标目录存在
-        fs.mkdirSync(targetProfile, { recursive: true });
-
-        // 读取现有的 cordis.patch.yml
-        let existingPatch = '';
-        if (fs.existsSync(patchFile)) {
-            existingPatch = fs.readFileSync(patchFile, 'utf-8').trim();
-        }
-
-        // 检查是否已经包含 dsh-market
-        const hasDshMarket = existingPatch.includes('dsh-market') || existingPatch.includes('dshmarket');
-
-        if (hasDshMarket) {
-            // 已包含，创建标记并跳过
-            if (!fs.existsSync(markerFile)) {
-                fs.writeFileSync(markerFile, new Date().toISOString());
-            }
-            return;
-        }
-
-        // 需要注入 dsh-market
-        const dshMarketPatch = `- insert:
-    - id: dsh-market
-      name: 'dshmarket'`;
-
-        // 处理不同的现有内容情况
-        let newPatch;
-        const normalizedPatch = existingPatch.replace(/#[^\n]*/g, '').trim(); // 移除注释
-
-        if (!normalizedPatch || normalizedPatch === '[]' || normalizedPatch === '--- []') {
-            // 空数组或不存在，直接替换
-            newPatch = dshMarketPatch;
-        } else if (normalizedPatch.startsWith('[') && normalizedPatch.endsWith(']')) {
-            // 数组内容不为空，在数组开头插入
-            const inner = normalizedPatch.slice(1, -1).trim();
-            if (inner) {
-                newPatch = `[${dshMarketPatch},\n${inner}]`;
-            } else {
-                newPatch = `[${dshMarketPatch}]`;
-            }
-        } else {
-            // 其他情况，追加
-            newPatch = existingPatch + '\n' + dshMarketPatch;
-        }
-
-        fs.writeFileSync(patchFile, newPatch, 'utf-8');
-        fs.writeFileSync(markerFile, new Date().toISOString());
-        console.log('[Runner] dsh-market 插件已注册到 profile');
-    } catch (e) {
-        console.warn('[Runner] 注册 dsh-market 插件失败:', e.message);
-    }
-}
-ensureDshMarketInstalled();
-
 // 读取向导配置变量 (wizard_variables)
 const dshEnv = { ...process.env };
 const wizardVarsFile = path.join(VAR_DIR, 'wizard_variables');
