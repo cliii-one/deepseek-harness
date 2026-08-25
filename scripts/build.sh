@@ -95,6 +95,28 @@ echo "==> Bundling pnpm ${PNPM_VERSION} for DSH plugin management..."
 "${WORK_DIR}/node/bin/npm" install --global --prefix "${WORK_DIR}/app_root" "pnpm@${PNPM_VERSION}" --omit=dev --no-audit --no-fund
 test -x "${WORK_DIR}/app_root/bin/pnpm"
 
+# 3b. 预装 dsh-market 插件市场到 web profile
+echo "==> Pre-installing dsh-market plugin..."
+export PATH="${WORK_DIR}/app_root/bin:${PATH}"
+export HOME="${WORK_DIR}/build-home"
+mkdir -p "${HOME}/.dsh/profiles/web"
+
+# 安装 dshmarket 包到 node_modules（确保包可用）
+echo "==> Installing dshmarket npm package..."
+"${WORK_DIR}/node/bin/npm" install "dshmarket@latest" --prefix "${WORK_DIR}/app_root" --omit=dev --no-audit --no-fund 2>/dev/null || {
+    echo "⚠️ npm install dshmarket 失败，尝试使用 dsh plugin 命令..."
+}
+
+# 创建 web profile 的 cordis.patch.yml（注册 dsh-market 插件）
+mkdir -p "${WORK_DIR}/app_root/.dsh/profiles/web"
+cat > "${WORK_DIR}/app_root/.dsh/profiles/web/cordis.patch.yml" << 'EOF'
+# dsh bundle patch: inserts this plugin into a profile's layer stack.
+- insert:
+    - id: dsh-market
+      name: 'dshmarket'
+EOF
+echo "✅ dsh-market profile 已创建"
+
 # 复制 ui 目录和 runner 脚本至 app_root (解压后位于 ${TRIM_APPDEST})
 if [ -d "${REPO_ROOT}/deepseek-harness/app/ui" ]; then
     echo "==> Bundling desktop UI config..."
