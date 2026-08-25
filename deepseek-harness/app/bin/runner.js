@@ -49,34 +49,57 @@ function ensureWorkspacePermissions() {
 }
 ensureWorkspacePermissions();
 
-// 首次启动时，将内置的 dsh-market profile 复制到用户 HOME 目录
-function ensureDshMarketProfile() {
-    const sourceProfile = path.join(APP_DIR, '.dsh', 'profiles', 'web');
+// 首次启动时，自动安装 dsh-market 插件到用户 profile
+function ensureDshMarketInstalled() {
     const targetProfile = path.join(WORKSPACE_DIR, '.dsh', 'profiles', 'web');
     const markerFile = path.join(targetProfile, '.dsh-market-initialized');
+    const patchFile = path.join(targetProfile, 'cordis.patch.yml');
 
-    // 如果目标已初始化，跳过
+    // 如果已初始化或 cordis.patch.yml 已包含 dsh-market，跳过
     if (fs.existsSync(markerFile)) return;
-
-    try {
-        // 确保目标目录存在
-        fs.mkdirSync(targetProfile, { recursive: true });
-
-        // 复制 cordis.patch.yml（如果存在）
-        const sourcePatch = path.join(sourceProfile, 'cordis.patch.yml');
-        const targetPatch = path.join(targetProfile, 'cordis.patch.yml');
-        if (fs.existsSync(sourcePatch)) {
-            fs.copyFileSync(sourcePatch, targetPatch);
-        }
-
-        // 写入初始化标记
-        fs.writeFileSync(markerFile, new Date().toISOString());
-        console.log('[Runner] dsh-market profile 已初始化');
-    } catch (e) {
-        console.warn('[Runner] 初始化 dsh-market profile 失败:', e.message);
+    if (fs.existsSync(patchFile)) {
+        try {
+            const content = fs.readFileSync(patchFile, 'utf-8');
+            if (content.includes('dsh-market') || content.includes('dshmarket')) {
+                fs.writeFileSync(markerFile, new Date().toISOString());
+                return;
+            }
+        } catch (e) {}
     }
+
+    // 异步运行 dsh plugin 命令，不阻塞启动
+    const { spawn } = require('child_process');
+    const dshBin = path.join(APP_DIR, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js');
+
+    console.log('[Runner] 首次启动，正在安装 dsh-market 插件市场...');
+    const installProcess = spawn(NODE_BIN, [dshBin, 'plugin', '--profile', 'web', 'add', 'dshmarket'], {
+        cwd: WORKSPACE_DIR,
+        env: {
+            ...process.env,
+            PATH: `${path.join(APP_DIR, 'bin')}:${process.env.PATH}`,
+            HOME: WORKSPACE_DIR
+        },
+        stdio: 'ignore',
+        detached: true
+    });
+
+    installProcess.unref();
+    installProcess.on('exit', (code) => {
+        if (code === 0) {
+            console.log('[Runner] dsh-market 安装成功');
+            try {
+                fs.mkdirSync(targetProfile, { recursive: true });
+                fs.writeFileSync(markerFile, new Date().toISOString());
+            } catch (e) {}
+        } else {
+            console.warn(`[Runner] dsh-market 安装失败 (exit code: ${code})`);
+        }
+    });
+    installProcess.on('error', (err) => {
+        console.warn('[Runner] dsh-market 安装出错:', err.message);
+    });
 }
-ensureDshMarketProfile();
+ensureDshMarketInstalled();
 
 // 读取向导配置变量 (wizard_variables)
 const dshEnv = { ...process.env };
