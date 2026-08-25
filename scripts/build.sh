@@ -115,16 +115,33 @@ fi
 
 # 3.5 预下载内置插件的 npm tgz（离线种子）。runner.js 在 NAS 上首次启动时
 # 会把这些 tgz 离线安装到 DSH 的插件 profile，实现"装完即用"，无需 NAS 联网。
+# 条目格式：npm 包名直接打包；@local/<name> 前缀表示从仓库内
+# plugins-src/<name>/ 目录打包（私有插件不发 npm，见 plan 决策 C）。
 if [ -n "${BUNDLED_DSH_PLUGINS}" ]; then
     echo "==> Bundling DSH plugins for offline seed: ${BUNDLED_DSH_PLUGINS}"
     mkdir -p "${WORK_DIR}/app_root/plugins"
     for PKG in ${BUNDLED_DSH_PLUGINS}; do
-        # 解析最新版本（仅显示用途；tgz 本身即锁定该版本的快照）
-        PKG_VER=$(npm view "${PKG}" version 2>/dev/null || echo "unknown")
-        echo "    - Fetching ${PKG}@${PKG_VER}..."
-        if ! "${WORK_DIR}/node/bin/npm" pack "${PKG}" --pack-destination "${WORK_DIR}/app_root/plugins" --silent; then
-            echo "❌ 预下载插件 ${PKG} 失败" >&2
-            exit 1
+        if [[ "${PKG}" == @local/* ]]; then
+            # 本地插件源：目录必须存在且含合法 package.json，否则显式失败。
+            LOCAL_DIR="${REPO_ROOT}/plugins-src/${PKG#@local/}"
+            if [ ! -f "${LOCAL_DIR}/package.json" ]; then
+                echo "❌ 本地插件目录不存在或缺少 package.json: ${LOCAL_DIR}" >&2
+                exit 1
+            fi
+            PKG_VER=$(node -p "require('${LOCAL_DIR}/package.json').version" 2>/dev/null || echo "unknown")
+            echo "    - Packing local plugin ${PKG#@local/}@${PKG_VER}..."
+            if ! "${WORK_DIR}/node/bin/npm" pack "${LOCAL_DIR}" --pack-destination "${WORK_DIR}/app_root/plugins" --silent; then
+                echo "❌ 打包本地插件 ${PKG} 失败" >&2
+                exit 1
+            fi
+        else
+            # npm 插件源：解析最新版本（仅显示用途；tgz 本身即锁定该版本的快照）
+            PKG_VER=$(npm view "${PKG}" version 2>/dev/null || echo "unknown")
+            echo "    - Fetching ${PKG}@${PKG_VER}..."
+            if ! "${WORK_DIR}/node/bin/npm" pack "${PKG}" --pack-destination "${WORK_DIR}/app_root/plugins" --silent; then
+                echo "❌ 预下载插件 ${PKG} 失败" >&2
+                exit 1
+            fi
         fi
     done
     # 写入清单供 runner.js 校验（记录实际打包的文件名）

@@ -1,0 +1,39 @@
+{
+  "name": "dsh-selfupdater",
+  "version": "0.1.0",
+  "description": "Self-update plugin for DeepSeek Harness: check npm for newer @deepseek-ai/dsh, swap node_modules atomically, restart, health-check and roll back on failure. DSH 主程序自更新插件。",
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/index.js",
+  "keywords": [
+    "deepseek",
+    "harness",
+    "dsh",
+    "dsh-plugin",
+    "self-update",
+    "updater"
+  ],
+  "files": [
+    "lib",
+    "client",
+    "cordis.patch.yml"
+  ],
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./client/settings-card.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-runtime"
+      ],
+      "platform": "web"
+    }
+  }
+}
