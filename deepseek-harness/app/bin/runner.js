@@ -77,23 +77,6 @@ if (fs.existsSync(wizardVarsFile)) {
 // 如果用户配置了 DEEPSEEK_BASE_URL 环境变量，传递给 DSH
 // 否则由用户在 DSH 的 Models 页面自行配置
 
-function migrateLegacyDefaultModel() {
-    const settingsFile = path.join(WORKSPACE_DIR, '.dsh', 'settings.yaml');
-    if (!fs.existsSync(settingsFile)) return false;
-    try {
-        const source = fs.readFileSync(settingsFile, 'utf-8');
-        // 恢复旧的"一万AI分享DSH专用模型"为原始模型ID
-        const legacyModel = /^(\s*model:\s*)(?:"一万AI分享DSH专用模型"|'一万AI分享DSH专用模型'|一万AI分享DSH专用模型)(\s*(?:#.*)?)$/m;
-        if (legacyModel.test(source)) {
-            fs.writeFileSync(settingsFile, source.replace(legacyModel, '$1deepseek-v4-flash$2'), 'utf-8');
-            return true;
-        }
-    } catch (error) {
-        console.warn('[Runner] 迁移旧默认模型失败:', error.message);
-    }
-    return false;
-}
-
 // 修复 "duplicate catalog model" 导致的 boot 失败（症状：UI 里所有会话消失）。
 // dsh-llm-deepseek 的内置 catalog 已含 deepseek-v4-flash / deepseek-v4-pro，
 // 若 settings.yaml 的 llm-deepseek.models 也写入了同名 id，启动时模型条目重复，
@@ -152,8 +135,117 @@ function dedupeCatalogModels() {
     return false;
 }
 
-const migratedModel = migrateLegacyDefaultModel();
 const catalogDeduped = dedupeCatalogModels();
+
+// ===================== 内置插件离线安装 =====================
+// 构建期已把插件 tgz 打包到 ${APP_DIR}/plugins（bundled.txt 记录清单）。
+// 首次启动时同步种子到工作区并调用 `dsh plugin add` 离线安装；
+// 安装成功后写 .dsh/bundled_plugins_done 标记，后续启动直接跳过。
+const PLUGINS_SEED_DIR = path.join(APP_DIR, 'plugins');
+const PLUGIN_MARKER_FILE = path.join(WORKSPACE_DIR, '.dsh', 'bundled_plugins_done');
+const DSH_PLUGIN_PROFILE = process.env.DSH_PLUGIN_PROFILE || 'web';
+
+/**
+ * 读取内置插件清单（bundled.txt，每行一个 tgz 文件名）
+ * @returns {string[]} tgz 文件名列表；无内置插件时返回空数组
+ */
+function readBundledPluginList() {
+    const listFile = path.join(PLUGINS_SEED_DIR, 'bundled.txt');
+    try {
+        if (!fs.existsSync(listFile)) return [];
+        return fs.readFileSync(listFile, 'utf-8')
+            .split('\n')
+            .map((s) => s.trim())
+            .filter((s) => s.endsWith('.tgz'));
+    } catch (e) {
+        return [];
+    }
+}
+
+/**
+ * 判断指定 tgz 是否已装入 profile（扫描 pnpm-lock.yaml / package.json 依赖名）
+ * @param {string} profileDir 插件 profile 目录
+ * @param {string} tgzName tgz 文件名（如 dshmarket-1.29.2.tgz）
+ * @returns {boolean} 已安装返回 true
+ */
+function isPluginInstalled(profileDir, tgzName) {
+    // 从 tgz 文件名提取包目录名：dshmarket-1.29.2.tgz -> dshmarket
+    const pkgDirName = tgzName.replace(/\.tgz$/, '').replace(/-\d+\.\d+[\w.-]*$/, '');
+    try {
+        const pkgJsonPath = path.join(profileDir, 'package.json');
+        if (fs.existsSync(pkgJsonPath)) {
+            const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf-8'));
+            const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+            if (Object.keys(deps).some((name) => name === pkgDirName || name.endsWith(`/${pkgDirName}`))) {
+                return true;
+            }
+        }
+        // 兜底检查 node_modules 实体目录是否存在
+        return fs.existsSync(path.join(profileDir, 'node_modules', pkgDirName));
+    } catch (e) {
+        return false;
+    }
+}
+
+/**
+ * 同步构建期插件种子到工作区（升级后新版本 tgz 覆盖旧种子）
+ */
+function syncPluginSeeds() {
+    try {
+        if (!fs.existsSync(PLUGINS_SEED_DIR)) return;
+        const target = path.join(WORKSPACE_DIR, '.dsh', 'plugin_seed');
+        fs.mkdirSync(target, { recursive: true, mode: 0o755 });
+        for (const f of [...readBundledPluginList(), 'bundled.txt']) {
+            const src = path.join(PLUGINS_SEED_DIR, f);
+            if (fs.existsSync(src)) {
+                fs.copyFileSync(src, path.join(target, f));
+            }
+        }
+    } catch (e) {
+        console.warn('[Runner] 同步插件种子失败:', e.message);
+    }
+}
+
+/**
+ * 首次启动把内置插件离线装入 DSH profile（同步执行，阻塞在 dsh 启动前）
+ */
+function installBundledPlugins() {
+    const plugins = readBundledPluginList();
+    if (!plugins.length) return; // 无内置插件，跳过
+    // 已装过且标记存在则跳过（用户卸载插件后标记仍在，不强制回装）
+    if (fs.existsSync(PLUGIN_MARKER_FILE)) return;
+
+    const seedDir = path.join(WORKSPACE_DIR, '.dsh', 'plugin_seed');
+    const profileDir = path.join(WORKSPACE_DIR, '.dsh', 'profiles', DSH_PLUGIN_PROFILE);
+    fs.mkdirSync(profileDir, { recursive: true, mode: 0o777 });
+
+    let allOk = true;
+    for (const tgz of plugins) {
+        if (isPluginInstalled(profileDir, tgz)) continue; // 幂等：已装则跳过
+        console.log(`[Runner] 正在内置安装插件: ${tgz} -> profile "${DSH_PLUGIN_PROFILE}"...`);
+        // dsh plugin add <tgz>：与手动执行 `dsh plugin --profile web add xxx` 等价
+        const r = spawn.sync(NODE_BIN, [DSH_BIN, 'plugin', '--profile', DSH_PLUGIN_PROFILE, 'add', path.join(seedDir, tgz)], {
+            cwd: WORKSPACE_DIR,
+            env: { ...process.env, PATH: `${path.join(APP_DIR, 'bin')}:${process.env.PATH}`, HOME: WORKSPACE_DIR },
+            stdio: 'inherit'
+        });
+        if (r.status !== 0) {
+            console.warn(`[Runner] 插件 ${tgz} 内置安装失败（不影响启动，可稍后在插件市场手动安装）`);
+            allOk = false;
+        }
+    }
+
+    // 全部成功才写标记；有失败则下次启动重试失败的插件
+    if (allOk) {
+        try {
+            fs.writeFileSync(PLUGIN_MARKER_FILE, new Date().toISOString(), 'utf-8');
+            console.log('[Runner] 内置插件安装完成');
+        } catch (e) {}
+    }
+}
+
+syncPluginSeeds();
+installBundledPlugins();
 
 // 强力 Polyfill 脚本：全面覆盖 window, self, globalThis, Crypto.prototype 以及 AbortSignal.any / AbortSignal.timeout
 const POLYFILL_SCRIPT = `<script>
@@ -255,7 +347,6 @@ const POLYFILL_SCRIPT = `<script>
 </script>`;
 
 console.log(`[Runner] 正在启动 DeepSeek Harness 后台服务 (127.0.0.1:${DSH_PORT})...`);
-if (migratedModel) console.log('[Runner] 已迁移旧的默认模型配置');
 if (catalogDeduped) console.log('[Runner] 已剔除 llm-deepseek 配置中与内置目录重复的模型条目');
 
 const dshProcess = spawn(NODE_BIN, [DSH_BIN, 'web', '--host', '127.0.0.1', '--port', String(DSH_PORT)], {

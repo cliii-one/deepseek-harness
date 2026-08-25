@@ -28,6 +28,13 @@ if [ -z "${VERSION:-}" ] || [ "${VERSION}" = "latest" ] || [ "${VERSION}" = "" ]
     VERSION="${RESOLVED_VER}"
 fi
 
+# 内置插件清单与目标 profile 均以 meta.env 为单一来源（空格分隔包名，构建时解析最新版）
+BUNDLED_DSH_PLUGINS="${BUNDLED_DSH_PLUGINS:-$(sed -n 's/^BUNDLED_DSH_PLUGINS=//p' "${SCRIPT_DIR}/meta.env" 2>/dev/null)}"
+DSH_PLUGIN_PROFILE="${DSH_PLUGIN_PROFILE:-$(sed -n 's/^DSH_PLUGIN_PROFILE=//p' "${SCRIPT_DIR}/meta.env" 2>/dev/null | tr -d '[:space:]')}"
+if [ -z "${DSH_PLUGIN_PROFILE}" ]; then
+    DSH_PLUGIN_PROFILE="web"
+fi
+
 TARBALL_ARCH="${TARBALL_ARCH:-amd64}"
 PNPM_VERSION="${PNPM_VERSION:-10.14.0}"
 OUTPUT_TGZ="${OUTPUT_TGZ:-${REPO_ROOT}/app_${TARBALL_ARCH}.tgz}"
@@ -104,6 +111,24 @@ if [ -d "${REPO_ROOT}/deepseek-harness/app/bin" ]; then
     echo "==> Bundling runner script..."
     cp -r "${REPO_ROOT}/deepseek-harness/app/bin/." "${WORK_DIR}/app_root/bin/"
     chmod +x "${WORK_DIR}/app_root/bin/"* 2>/dev/null || true
+fi
+
+# 3.5 预下载内置插件的 npm tgz（离线种子）。runner.js 在 NAS 上首次启动时
+# 会把这些 tgz 离线安装到 DSH 的插件 profile，实现"装完即用"，无需 NAS 联网。
+if [ -n "${BUNDLED_DSH_PLUGINS}" ]; then
+    echo "==> Bundling DSH plugins for offline seed: ${BUNDLED_DSH_PLUGINS}"
+    mkdir -p "${WORK_DIR}/app_root/plugins"
+    for PKG in ${BUNDLED_DSH_PLUGINS}; do
+        # 解析最新版本（仅显示用途；tgz 本身即锁定该版本的快照）
+        PKG_VER=$(npm view "${PKG}" version 2>/dev/null || echo "unknown")
+        echo "    - Fetching ${PKG}@${PKG_VER}..."
+        if ! "${WORK_DIR}/node/bin/npm" pack "${PKG}" --pack-destination "${WORK_DIR}/app_root/plugins" --silent; then
+            echo "❌ 预下载插件 ${PKG} 失败" >&2
+            exit 1
+        fi
+    done
+    # 写入清单供 runner.js 校验（记录实际打包的文件名）
+    ls "${WORK_DIR}/app_root/plugins"/*.tgz | xargs -n1 basename > "${WORK_DIR}/app_root/plugins/bundled.txt"
 fi
 
 # 4. 执行飞牛目录选择与浏览器兼容补丁；不限制提供商或模型目录。
