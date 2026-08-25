@@ -74,6 +74,9 @@ jobs:
           # 复制 app.tgz 到 deepseek-harness/
           cp app_arm64.tgz "$PKG/app.tgz"
 
+          # 复制 ui 到根目录供 FPK 使用
+          cp -a "$PKG/app/ui" "$PKG/ui"
+
           # 打包 FPK（所有文件在根目录，与参考项目一致）
           cd "$PKG"
           tar -cf "../${FPK_NAME}" \
@@ -149,6 +152,7 @@ jobs:
           PKG="deepseek-harness"
 
           cp app_amd64.tgz "$PKG/app.tgz"
+          cp -a "$PKG/app/ui" "$PKG/ui"
 
           cd "$PKG"
           tar -cf "../${FPK_NAME}" \
