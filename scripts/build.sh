@@ -95,11 +95,19 @@ echo "==> Bundling pnpm ${PNPM_VERSION} for DSH plugin management..."
 "${WORK_DIR}/node/bin/npm" install --global --prefix "${WORK_DIR}/app_root" "pnpm@${PNPM_VERSION}" --omit=dev --no-audit --no-fund
 test -x "${WORK_DIR}/app_root/bin/pnpm"
 
-# 3b. 预装 dsh-market 插件市场（安装 npm 包，运行时由 runner.js 注册到 profile）
-echo "==> Pre-installing dshmarket npm package..."
+# 3b. 预装 dsh-market 插件市场
+echo "==> Pre-installing dshmarket plugin..."
 "${WORK_DIR}/node/bin/npm" install "dshmarket@latest" --prefix "${WORK_DIR}/app_root" --omit=dev --no-audit --no-fund 2>/dev/null || {
     echo "⚠️ dshmarket npm 安装失败，将跳过预装"
 }
+
+# 创建 web profile 的初始配置（首次启动时 runner.js 会检查并注册）
+mkdir -p "${WORK_DIR}/app_root/.dsh/profiles/web"
+# 写入空的 cordis.patch.yml（runner.js 会在首次启动时注入 dsh-market）
+cat > "${WORK_DIR}/app_root/.dsh/profiles/web/cordis.patch.yml" << 'EOF'
+# Your patch layer for this dsh profile, applied after every bundle layer.
+[]
+EOF
 echo "✅ dshmarket 包已预装到 node_modules"
 
 # 复制 ui 目录和 runner 脚本至 app_root (解压后位于 ${TRIM_APPDEST})

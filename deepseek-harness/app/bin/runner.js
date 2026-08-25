@@ -55,9 +55,6 @@ function ensureDshMarketInstalled() {
     const markerFile = path.join(targetProfile, '.dsh-market-initialized');
     const patchFile = path.join(targetProfile, 'cordis.patch.yml');
 
-    // 如果已初始化，跳过
-    if (fs.existsSync(markerFile)) return;
-
     try {
         // 确保目标目录存在
         fs.mkdirSync(targetProfile, { recursive: true });
@@ -68,24 +65,39 @@ function ensureDshMarketInstalled() {
             existingPatch = fs.readFileSync(patchFile, 'utf-8').trim();
         }
 
-        // 如果已经包含 dsh-market，标记并跳过
-        if (existingPatch.includes('dsh-market') || existingPatch.includes('dshmarket')) {
-            fs.writeFileSync(markerFile, new Date().toISOString());
+        // 检查是否已经包含 dsh-market
+        const hasDshMarket = existingPatch.includes('dsh-market') || existingPatch.includes('dshmarket');
+
+        if (hasDshMarket) {
+            // 已包含，创建标记并跳过
+            if (!fs.existsSync(markerFile)) {
+                fs.writeFileSync(markerFile, new Date().toISOString());
+            }
             return;
         }
 
-        // dshmarket 包自带的 patch 内容
-        const dshMarketPatch = `# dsh bundle patch: inserts this plugin into a profile's layer stack.
-- insert:
+        // 需要注入 dsh-market
+        const dshMarketPatch = `- insert:
     - id: dsh-market
       name: 'dshmarket'`;
 
-        // 合并 patch：如果现有内容是空数组或不存在，直接替换
+        // 处理不同的现有内容情况
         let newPatch;
-        if (!existingPatch || existingPatch === '[]' || existingPatch === '--- []') {
+        const normalizedPatch = existingPatch.replace(/#[^\n]*/g, '').trim(); // 移除注释
+
+        if (!normalizedPatch || normalizedPatch === '[]' || normalizedPatch === '--- []') {
+            // 空数组或不存在，直接替换
             newPatch = dshMarketPatch;
+        } else if (normalizedPatch.startsWith('[') && normalizedPatch.endsWith(']')) {
+            // 数组内容不为空，在数组开头插入
+            const inner = normalizedPatch.slice(1, -1).trim();
+            if (inner) {
+                newPatch = `[${dshMarketPatch},\n${inner}]`;
+            } else {
+                newPatch = `[${dshMarketPatch}]`;
+            }
         } else {
-            // 追加到现有 patch
+            // 其他情况，追加
             newPatch = existingPatch + '\n' + dshMarketPatch;
         }
 
