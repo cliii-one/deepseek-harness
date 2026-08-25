@@ -49,55 +49,52 @@ function ensureWorkspacePermissions() {
 }
 ensureWorkspacePermissions();
 
-// 首次启动时，自动安装 dsh-market 插件到用户 profile
+// 首次启动时，自动注册 dsh-market 插件到用户 profile
 function ensureDshMarketInstalled() {
     const targetProfile = path.join(WORKSPACE_DIR, '.dsh', 'profiles', 'web');
     const markerFile = path.join(targetProfile, '.dsh-market-initialized');
     const patchFile = path.join(targetProfile, 'cordis.patch.yml');
 
-    // 如果已初始化或 cordis.patch.yml 已包含 dsh-market，跳过
+    // 如果已初始化，跳过
     if (fs.existsSync(markerFile)) return;
-    if (fs.existsSync(patchFile)) {
-        try {
-            const content = fs.readFileSync(patchFile, 'utf-8');
-            if (content.includes('dsh-market') || content.includes('dshmarket')) {
-                fs.writeFileSync(markerFile, new Date().toISOString());
-                return;
-            }
-        } catch (e) {}
-    }
 
-    // 异步运行 dsh plugin 命令，不阻塞启动
-    const { spawn } = require('child_process');
-    const dshBin = path.join(APP_DIR, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js');
+    try {
+        // 确保目标目录存在
+        fs.mkdirSync(targetProfile, { recursive: true });
 
-    console.log('[Runner] 首次启动，正在安装 dsh-market 插件市场...');
-    const installProcess = spawn(NODE_BIN, [dshBin, 'plugin', '--profile', 'web', 'add', 'dshmarket'], {
-        cwd: WORKSPACE_DIR,
-        env: {
-            ...process.env,
-            PATH: `${path.join(APP_DIR, 'bin')}:${process.env.PATH}`,
-            HOME: WORKSPACE_DIR
-        },
-        stdio: 'ignore',
-        detached: true
-    });
-
-    installProcess.unref();
-    installProcess.on('exit', (code) => {
-        if (code === 0) {
-            console.log('[Runner] dsh-market 安装成功');
-            try {
-                fs.mkdirSync(targetProfile, { recursive: true });
-                fs.writeFileSync(markerFile, new Date().toISOString());
-            } catch (e) {}
-        } else {
-            console.warn(`[Runner] dsh-market 安装失败 (exit code: ${code})`);
+        // 读取现有的 cordis.patch.yml
+        let existingPatch = '';
+        if (fs.existsSync(patchFile)) {
+            existingPatch = fs.readFileSync(patchFile, 'utf-8').trim();
         }
-    });
-    installProcess.on('error', (err) => {
-        console.warn('[Runner] dsh-market 安装出错:', err.message);
-    });
+
+        // 如果已经包含 dsh-market，标记并跳过
+        if (existingPatch.includes('dsh-market') || existingPatch.includes('dshmarket')) {
+            fs.writeFileSync(markerFile, new Date().toISOString());
+            return;
+        }
+
+        // dshmarket 包自带的 patch 内容
+        const dshMarketPatch = `# dsh bundle patch: inserts this plugin into a profile's layer stack.
+- insert:
+    - id: dsh-market
+      name: 'dshmarket'`;
+
+        // 合并 patch：如果现有内容是空数组或不存在，直接替换
+        let newPatch;
+        if (!existingPatch || existingPatch === '[]' || existingPatch === '--- []') {
+            newPatch = dshMarketPatch;
+        } else {
+            // 追加到现有 patch
+            newPatch = existingPatch + '\n' + dshMarketPatch;
+        }
+
+        fs.writeFileSync(patchFile, newPatch, 'utf-8');
+        fs.writeFileSync(markerFile, new Date().toISOString());
+        console.log('[Runner] dsh-market 插件已注册到 profile');
+    } catch (e) {
+        console.warn('[Runner] 注册 dsh-market 插件失败:', e.message);
+    }
 }
 ensureDshMarketInstalled();
 
