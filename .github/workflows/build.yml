@@ -21,6 +21,8 @@ jobs:
     name: 构建 ARM64
     if: inputs.platform == 'arm' || inputs.platform == 'all'
     runs-on: ubuntu-24.04-arm
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -106,6 +108,8 @@ jobs:
     name: 构建 x86_64
     if: inputs.platform == 'x86' || inputs.platform == 'all'
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -198,10 +202,12 @@ jobs:
       - name: 获取版本号
         id: version
         run: |
-          # 从FPK文件名中提取版本号（DSH版本是唯一来源）
-          # 文件名格式: deepseek-harness_0.1.1-rc.2_arm.fpk
-          FPK_FILE=$(find artifacts -name "*.fpk" | head -1)
-          VER=$(echo "$FPK_FILE" | sed 's/.*deepseek-harness_//' | sed 's/_[^_]*\.fpk$//')
+          # 优先使用构建job传递的版本号
+          VER="${{ needs.build-arm.outputs.version || needs.build-x86.outputs.version }}"
+          if [ -z "$VER" ]; then
+            echo "ERROR: 无法获取版本号" >&2
+            exit 1
+          fi
           echo "version=$VER" >> $GITHUB_OUTPUT
           echo "版本: $VER"
           mkdir -p release
