@@ -196,8 +196,15 @@ jobs:
       - name: 获取版本号
         id: version
         run: |
-          MANIFEST_VER=$(grep '^version' deepseek-harness/manifest | awk -F'=' '{print $2}' | tr -d ' ')
-          echo "version=$MANIFEST_VER" >> $GITHUB_OUTPUT
+          # 从FPK文件名中提取版本号（DSH版本是唯一来源）
+          FPK_FILE=$(find artifacts -name "*.fpk" | head -1)
+          VER=$(echo "$FPK_FILE" | sed 's/.*deepseek-harness_\([^_]*_[^_]*\).*/\1/' | sed 's/_arm$//' | sed 's/_x86$//')
+          # 如果匹配失败，用正则提取
+          if [ -z "$VER" ]; then
+            VER=$(echo "$FPK_FILE" | grep -oP 'deepseek-harness_\K[^_]+_[^_.]+')
+          fi
+          echo "version=$VER" >> $GITHUB_OUTPUT
+          echo "版本: $VER"
           mkdir -p release
           find artifacts -name "*.fpk" -exec cp {} release/ \;
           ls -lh release/
