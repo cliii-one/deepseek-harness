@@ -6,7 +6,7 @@
  * 4. 精确进程生命周期管理，响应 SIGTERM/SIGINT 秒级退出
  */
 
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const fs = require('fs');
 const http = require('http');
 const net = require('net');
@@ -163,28 +163,35 @@ function readBundledPluginList() {
 }
 
 /**
- * 判断指定 tgz 是否已装入 profile（扫描 pnpm-lock.yaml / package.json 依赖名）
+ * 从 profile 的 package.json 中读取指定插件当前安装的版本号
  * @param {string} profileDir 插件 profile 目录
- * @param {string} tgzName tgz 文件名（如 dshmarket-1.29.2.tgz）
- * @returns {boolean} 已安装返回 true
+ * @param {string} pkgName 插件包名（如 dshmarket）
+ * @returns {string|null} 已安装版本号；查不到返回 null
  */
-function isPluginInstalled(profileDir, tgzName) {
-    // 从 tgz 文件名提取包目录名：dshmarket-1.29.2.tgz -> dshmarket
-    const pkgDirName = tgzName.replace(/\.tgz$/, '').replace(/-\d+\.\d+[\w.-]*$/, '');
+function getInstalledPluginVersion(profileDir, pkgName) {
     try {
         const pkgJsonPath = path.join(profileDir, 'package.json');
-        if (fs.existsSync(pkgJsonPath)) {
-            const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf-8'));
-            const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
-            if (Object.keys(deps).some((name) => name === pkgDirName || name.endsWith(`/${pkgDirName}`))) {
-                return true;
-            }
+        if (!fs.existsSync(pkgJsonPath)) return null;
+        const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf-8'));
+        const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+        for (const [name, ver] of Object.entries(deps)) {
+            // 兼容 scoped 包名（@a/b）与非 scoped 名的匹配
+            if (name === pkgName || name.endsWith(`/${pkgName}`)) return ver;
         }
-        // 兜底检查 node_modules 实体目录是否存在
-        return fs.existsSync(path.join(profileDir, 'node_modules', pkgDirName));
-    } catch (e) {
-        return false;
-    }
+    } catch (e) {}
+    return null;
+}
+
+/**
+ * 从 tgz 文件名解析包名与版本号：dshmarket-1.29.2.tgz -> { name: 'dshmarket', version: '1.29.2' }
+ * 注意：scoped 包名形如 scope-name-pkg-1.0.0，无法从文件名精确还原 @scope/pkg，
+ * 这里仅做非严格解析，供版本比对参考
+ */
+function parseTgzName(tgzName) {
+    const base = tgzName.replace(/\.tgz$/, '');
+    const m = base.match(/^(.+?)-(\d+\.\d+\.[\w.-]*)$/);
+    if (!m) return { name: base, version: null };
+    return { name: m[1], version: m[2] };
 }
 
 /**
@@ -207,13 +214,12 @@ function syncPluginSeeds() {
 }
 
 /**
- * 首次启动把内置插件离线装入 DSH profile（同步执行，阻塞在 dsh 启动前）
+ * 首次启动把内置插件离线装入 DSH profile（同步执行，阻塞在 dsh 启动前）。
+ * 升级场景：应用升级后种子里的 tgz 版本比 profile 已装版本新时自动重装。
  */
 function installBundledPlugins() {
     const plugins = readBundledPluginList();
     if (!plugins.length) return; // 无内置插件，跳过
-    // 已装过且标记存在则跳过（用户卸载插件后标记仍在，不强制回装）
-    if (fs.existsSync(PLUGIN_MARKER_FILE)) return;
 
     const seedDir = path.join(WORKSPACE_DIR, '.dsh', 'plugin_seed');
     const profileDir = path.join(WORKSPACE_DIR, '.dsh', 'profiles', DSH_PLUGIN_PROFILE);
@@ -221,10 +227,12 @@ function installBundledPlugins() {
 
     let allOk = true;
     for (const tgz of plugins) {
-        if (isPluginInstalled(profileDir, tgz)) continue; // 幂等：已装则跳过
-        console.log(`[Runner] 正在内置安装插件: ${tgz} -> profile "${DSH_PLUGIN_PROFILE}"...`);
+        const { name: pkgName, version: seedVer } = parseTgzName(tgz);
+        const installedVer = getInstalledPluginVersion(profileDir, pkgName);
+        if (installedVer && (!seedVer || installedVer === seedVer)) continue; // 幂等：同版本已装则跳过
+        console.log(`[Runner] 正在内置安装插件: ${tgz}${installedVer ? `（升级：${installedVer} -> ${seedVer}）` : ''} -> profile "${DSH_PLUGIN_PROFILE}"...`);
         // dsh plugin add <tgz>：与手动执行 `dsh plugin --profile web add xxx` 等价
-        const r = spawn.sync(NODE_BIN, [DSH_BIN, 'plugin', '--profile', DSH_PLUGIN_PROFILE, 'add', path.join(seedDir, tgz)], {
+        const r = spawnSync(NODE_BIN, [DSH_BIN, 'plugin', '--profile', DSH_PLUGIN_PROFILE, 'add', path.join(seedDir, tgz)], {
             cwd: WORKSPACE_DIR,
             env: { ...process.env, PATH: `${path.join(APP_DIR, 'bin')}:${process.env.PATH}`, HOME: WORKSPACE_DIR },
             stdio: 'inherit'
@@ -235,17 +243,22 @@ function installBundledPlugins() {
         }
     }
 
-    // 全部成功才写标记；有失败则下次启动重试失败的插件
+    // 记录本轮处理完成的版本清单，便于排查与观测
     if (allOk) {
         try {
-            fs.writeFileSync(PLUGIN_MARKER_FILE, new Date().toISOString(), 'utf-8');
-            console.log('[Runner] 内置插件安装完成');
+            fs.writeFileSync(PLUGIN_MARKER_FILE, `${new Date().toISOString()} plugins=${plugins.join(',')}`, 'utf-8');
+            console.log('[Runner] 内置插件检查/安装完成');
         } catch (e) {}
     }
 }
 
-syncPluginSeeds();
-installBundledPlugins();
+// 内置插件安装属于"锦上添花"：任何异常都不能阻断 dsh 主服务启动
+try {
+    syncPluginSeeds();
+    installBundledPlugins();
+} catch (e) {
+    console.warn('[Runner] 内置插件流程异常（不影响启动）:', e.message);
+}
 
 // 强力 Polyfill 脚本：全面覆盖 window, self, globalThis, Crypto.prototype 以及 AbortSignal.any / AbortSignal.timeout
 const POLYFILL_SCRIPT = `<script>

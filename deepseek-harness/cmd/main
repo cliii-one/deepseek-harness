@@ -25,6 +25,31 @@ log_msg() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOG_FILE}"
 }
 
+# 日志轮转：超过 10MB 时保留一份 .log.1 旧日志，防止无限增长撑爆磁盘
+rotate_log_if_needed() {
+    [ -f "${LOG_FILE}" ] || return 0
+    local size
+    size=$(stat -c%s "${LOG_FILE}" 2>/dev/null || echo 0)
+    if [ "${size}" -gt $((10 * 1024 * 1024)) ]; then
+        mv -f "${LOG_FILE}" "${LOG_FILE}.1" 2>/dev/null || true
+        log_msg "Log rotated (${size} bytes), old log kept as ${LOG_FILE}.1"
+    fi
+}
+rotate_log_if_needed
+
+# 校验 PID 是否为本应用进程（runner.js / dsh / node 特征）
+# 场景：端口被其他应用占用时，不能把别人家进程当成自己的实例
+is_our_process() {
+    local pid="$1"
+    [ -z "${pid}" ] && return 1
+    local cmdline
+    cmdline=$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null)
+    case "${cmdline}" in
+        *runner.js*|*@deepseek-ai/dsh*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # 按命令行特征找回存活实例（PID 文件丢失/失效时的自愈兜底）
 # pgrep 需排除自身，避免命中正在执行本脚本的 bash 进程
 runner_pids() {
@@ -75,12 +100,19 @@ start_process() {
     fi
 
     # 启动前确认端口未被本应用实例占用（避免双实例 EADDRINUSE 误报失败）
+    # 注意：必须校验占用者是本应用进程，否则其他应用占 3080 时会误报"启动成功"
     local bound_pid
     bound_pid=$(port_owner_pid)
     if instance_alive "${bound_pid}"; then
-        log_msg "Port 3080/3081 held by PID ${bound_pid}, treating as running"
-        printf "%s" "${bound_pid}" > "${PID_FILE}"
-        return 0
+        if is_our_process "${bound_pid}"; then
+            log_msg "Port 3080/3081 held by our instance PID ${bound_pid}, treating as running"
+            printf "%s" "${bound_pid}" > "${PID_FILE}"
+            return 0
+        else
+            log_msg "ERROR: port 3080/3081 held by foreign process PID ${bound_pid} ($(tr '\0' ' ' < /proc/${bound_pid}/cmdline 2>/dev/null)), cannot start"
+            echo "✗ 端口 3080/3081 已被其他应用 (PID ${bound_pid}) 占用" >&2
+            return 1
+        fi
     fi
 
     export PATH="${TRIM_APPDEST}/bin:$PATH"
