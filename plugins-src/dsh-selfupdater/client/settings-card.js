@@ -1,11 +1,17 @@
 /**
  * dsh-selfupdater 浏览器端入口：在设置页注入"版本更新"卡片。
  *
- * 写法完全对照 dshmarket src/client/index.ts 的模式：
- * - 导出 name / inject / apply(ctx) 三件套，由 ModuleLoader 加载；
- * - 通过 ctx.slots.inject('settings.section', …) 注册主设置区；
- * - 通过嵌套 inject(['settingsScope']) 在插件区注册卡片；
- * - 缺失宿主能力时优雅降级（console.warn 后直接返回，不炸页面）。
+ * 【加载协议 - 重要】DSH 的 ModuleLoader 动态 import 本 bundle 后，
+ * 会核对注册表中是否存在本插件的注册记录；bundle 必须在模块执行期间
+ * 同步调用 window.__ModuleLoader__.load({ id, factory }) 完成自注册，
+ * 否则报 "loaded without registering ... via __ModuleLoader__.load"。
+ *
+ * 格式完全对照官方 dshmarket@1.29.2 编译产物（client/client.js）：
+ *   window.__ModuleLoader__.load({ id: "dshmarket", factory: (require) => { … } });
+ * factory 接收宿主注入的 require 函数，用于获取外部依赖
+ * （react / @deepseek-ai/dsh-client-runtime 等，由 package.json 中
+ * dsh.client.inject 列表声明）；内部用 CommonJS module.exports
+ * 返回 { name, inject, apply } 三件套。
  *
  * 主题适配策略（亮暗双模式）：
  * - 不硬编码任何颜色；所有颜色走 --dshsu-* CSS 变量；
@@ -15,10 +21,22 @@
  *   把对应调色板写到根节点的 --dshsu-* 变量上；
  * - 两张卡片（主设置区 + 插件区）自动跟随，无需各自感知主题。
  */
-import { createElement as h, useState } from 'react';
+window.__ModuleLoader__.load({
+    id: 'dsh-selfupdater',
+    // 工厂函数：宿主传入 require 用于获取注入的外部模块（等价编译前的 import）。
+    factory: (require) => {
+        const module = { exports: {} };
+        const exports = module.exports;
 
-export const name = 'dsh-selfupdater';
-export const inject = ['slots'];
+        const react = require('react');
+        // 保留原代码里的 h 短名（createElement 的别名），避免大面积改动。
+        const h = react.createElement;
+        const useState = react.useState;
+
+        // ModuleLoader 约定的插件三件套：id、依赖的服务、入口函数。
+        // slots：插槽服务（必需）；locale：文案服务（缺失时 apply 内部会兜底降级）。
+        const name = 'dsh-selfupdater';
+        const inject = ['slots', 'locale'];
 
 const NS = 'dsh-selfupdater';
 const API_BASE = '/dsh-selfupdater';
@@ -333,7 +351,7 @@ const FALLBACK_DICT = {
  * 浏览器端 apply 入口。
  * @param ctx - 客户端上下文（slots 必需；locale/settingsScope 可选降级）
  */
-export function apply(ctx) {
+function apply(ctx) {
     const slots = ctx.slots;
     if (slots === undefined || typeof slots.inject !== 'function') {
         console.warn(`[${NS}] 宿主未提供 slots 服务，设置卡片不可用`);
@@ -444,3 +462,12 @@ export function apply(ctx) {
     // 启动首轮轮询。
     void pollStatus();
 }
+
+    // 按 dshmarket 编译产物的收尾格式：把三件套逐个挂到 exports 并返回命名空间对象。
+    exports.name = name;
+    exports.inject = inject;
+    exports.apply = apply;
+    return module.exports;
+    // 关闭 factory 函数体（对应顶部的 factory: (require) => {）。
+}
+});
