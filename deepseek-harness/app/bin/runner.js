@@ -49,6 +49,35 @@ function ensureWorkspacePermissions() {
 }
 ensureWorkspacePermissions();
 
+// 首次启动时，将内置的 dsh-market profile 复制到用户 HOME 目录
+function ensureDshMarketProfile() {
+    const sourceProfile = path.join(APP_DIR, '.dsh', 'profiles', 'web');
+    const targetProfile = path.join(WORKSPACE_DIR, '.dsh', 'profiles', 'web');
+    const markerFile = path.join(targetProfile, '.dsh-market-initialized');
+
+    // 如果目标已初始化，跳过
+    if (fs.existsSync(markerFile)) return;
+
+    try {
+        // 确保目标目录存在
+        fs.mkdirSync(targetProfile, { recursive: true });
+
+        // 复制 cordis.patch.yml（如果存在）
+        const sourcePatch = path.join(sourceProfile, 'cordis.patch.yml');
+        const targetPatch = path.join(targetProfile, 'cordis.patch.yml');
+        if (fs.existsSync(sourcePatch)) {
+            fs.copyFileSync(sourcePatch, targetPatch);
+        }
+
+        // 写入初始化标记
+        fs.writeFileSync(markerFile, new Date().toISOString());
+        console.log('[Runner] dsh-market profile 已初始化');
+    } catch (e) {
+        console.warn('[Runner] 初始化 dsh-market profile 失败:', e.message);
+    }
+}
+ensureDshMarketProfile();
+
 // 读取向导配置变量 (wizard_variables)
 const dshEnv = { ...process.env };
 const wizardVarsFile = path.join(VAR_DIR, 'wizard_variables');
