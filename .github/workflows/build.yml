@@ -12,6 +12,10 @@ on:
           - arm
           - x86
           - all
+      version:
+        description: 'DSH版本号（留空则自动解析最新版）'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -37,6 +41,7 @@ jobs:
         working-directory: scripts
         env:
           TARBALL_ARCH: arm64
+          VERSION: ${{ inputs.version || '' }}
         run: bash build.sh
 
       # 从 build.sh 产出的 app.tgz 中提取实际 DSH 版本号
@@ -123,6 +128,7 @@ jobs:
         working-directory: scripts
         env:
           TARBALL_ARCH: amd64
+          VERSION: ${{ inputs.version || '' }}
         run: bash build.sh
 
       - name: 获取 DSH 版本号
@@ -199,7 +205,7 @@ jobs:
         with:
           path: artifacts
 
-      - name: 获取版本号
+      - name: 获取版本号与构建产物
         id: version
         run: |
           # 优先使用构建job传递的版本号
@@ -210,9 +216,40 @@ jobs:
           fi
           echo "version=$VER" >> $GITHUB_OUTPUT
           echo "版本: $VER"
+
           mkdir -p release
           find artifacts -name "*.fpk" -exec cp {} release/ \;
+
+          # 动态检测已构建的架构
+          HAS_ARM="false"
+          HAS_X86="false"
+          if ls release/*_arm.fpk 1>/dev/null 2>&1; then HAS_ARM="true"; fi
+          if ls release/*_x86.fpk 1>/dev/null 2>&1; then HAS_X86="true"; fi
+          echo "has_arm=$HAS_ARM" >> $GITHUB_OUTPUT
+          echo "has_x86=$HAS_X86" >> $GITHUB_OUTPUT
+
           ls -lh release/
+
+      - name: 生成 Release 说明
+        id: body
+        run: |
+          VER="${{ steps.version.outputs.version }}"
+          HAS_ARM="${{ steps.version.outputs.has_arm }}"
+          HAS_X86="${{ steps.version.outputs.has_x86 }}"
+
+          BODY="## DeepSeek Harness v${VER}\n\n### 📦 下载\n\n| 文件 | 架构 | 适用设备 |\n|------|------|----------|\n"
+
+          if [ "$HAS_X86" = "true" ]; then
+            BODY="${BODY}| \`deepseek-harness_${VER}_x86.fpk\` | x86_64 | Intel/AMD NAS |\n"
+          fi
+          if [ "$HAS_ARM" = "true" ]; then
+            BODY="${BODY}| \`deepseek-harness_${VER}_arm.fpk\` | arm64 | ARM NAS |\n"
+          fi
+
+          BODY="${BODY}\n### 安装方式\n1. 下载对应架构的 \`.fpk\` 文件\n2. 登录飞牛NAS桌面 → 应用中心 → 手动安装\n3. 选择下载的文件完成安装"
+
+          # 写入多行文件避免 shell 转义问题
+          echo -e "$BODY" > release_body.md
 
       - name: 创建 Release
         uses: softprops/action-gh-release@v2
@@ -221,19 +258,6 @@ jobs:
           name: "DeepSeek Harness v${{ steps.version.outputs.version }}"
           files: release/*.fpk
           generate_release_notes: false
-          body: |
-            ## DeepSeek Harness v${{ steps.version.outputs.version }}
-
-            ### 📦 下载
-
-            | 文件 | 架构 | 适用设备 |
-            |------|------|----------|
-            | `deepseek-harness_${{ steps.version.outputs.version }}_x86.fpk` | x86_64 | Intel/AMD NAS |
-            | `deepseek-harness_${{ steps.version.outputs.version }}_arm.fpk` | arm64 | ARM NAS |
-
-            ### 安装方式
-            1. 下载对应架构的 `.fpk` 文件
-            2. 登录飞牛NAS桌面 → 应用中心 → 手动安装
-            3. 选择下载的文件完成安装
+          body_path: release_body.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
