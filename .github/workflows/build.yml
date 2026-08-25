@@ -199,8 +199,9 @@ jobs:
         id: version
         run: |
           # 从FPK文件名中提取版本号（DSH版本是唯一来源）
+          # 文件名格式: deepseek-harness_0.1.1-rc.2_arm.fpk
           FPK_FILE=$(find artifacts -name "*.fpk" | head -1)
-          VER=$(echo "$FPK_FILE" | grep -oP 'deepseek-harness_\K[^_.]+_[^_.]+')
+          VER=$(echo "$FPK_FILE" | sed 's/.*deepseek-harness_//' | sed 's/_[^_]*\.fpk$//')
           echo "version=$VER" >> $GITHUB_OUTPUT
           echo "版本: $VER"
           mkdir -p release
