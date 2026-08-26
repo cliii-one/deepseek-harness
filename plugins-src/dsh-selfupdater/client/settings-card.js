@@ -224,6 +224,8 @@ const CARD_CSS = `
 .dshsu-pill{font-size:12px;padding:2px 9px;border-radius:999px;white-space:nowrap}
 .dshsu-pill-ok{color:var(--dshsu-success);background:var(--dshsu-success-soft)}
 .dshsu-pill-bad{color:var(--dshsu-danger);background:var(--dshsu-danger-soft)}
+/* 待重启徽章：琥珀色提醒"新版已装好，重启后生效" */
+.dshsu-pill-new{color:var(--dshsu-warn);background:var(--dshsu-warn-soft);font-weight:600}
 /* ---- 单卡片内两个小节之间的分隔线（随主题换肤） ---- */
 .dshsu-divider{height:1px;background:var(--dshsu-border);margin:4px 0}
 /* 单卡片内的插件小节容器：只负责纵向排布，不画边框（边框属于整张卡片）。 */
@@ -280,6 +282,7 @@ const STATE_LABELS = {
     rollback: '升级失败，正在回滚…',
     done: '升级完成',
     done_failed: '已回滚到旧版本',
+    done_pending_restart: '已更新，等待重启生效',
     error: '升级出错',
 };
 
@@ -459,8 +462,10 @@ function formatTime(iso) {
  * 展示模板与 DSH 小节同款三行：当前版本 / 最新版本 / 上次检查。
  * ------------------------------------------------------------------ */
 
-/** 插件更新进行中的状态集合（与后端锁文件/state 约定一致）。 */
-const PLUGIN_BUSY_STATES = ['running', 'downloading', 'restarting', 'healthcheck', 'rollback'];
+/** 插件更新进行中的状态集合（与后端锁文件/state 约定一致）。
+ *  注意：done_pending_restart 是"已装好、等重启"的终态，不算进行中；
+ *  swapping 是 v0.4.6 进程内安装阶段的 state，需要视为忙碌。 */
+const PLUGIN_BUSY_STATES = ['running', 'downloading', 'swapping', 'healthcheck', 'rollback'];
 
 /**
  * 插件更新小节：数据契约与 DSH 小节一致
@@ -471,10 +476,12 @@ const PLUGIN_BUSY_STATES = ['running', 'downloading', 'restarting', 'healthcheck
  */
 function PluginSection({ t, plugin, busy, checking, msg, onCheck, onUpgrade }) {
     const updateAvailable = plugin?.updateAvailable === true;
-    // 结果消息的语义着色：成功绿 / 失败红 / 其余灰。
-    const msgClass = /已是最新|完成|成功/.test(msg) ? ' dshsu-msg-ok'
+    // 结果消息的语义着色：成功绿（含"待重启生效"类提示）/ 失败红 / 其余灰。
+    const msgClass = /已是最新|完成|成功|无需更新|生效/.test(msg) ? ' dshsu-msg-ok'
         : /失败|出错|错误|超时/.test(msg) ? ' dshsu-msg-bad'
             : '';
+    // 已装好新版但宿主未重启：右侧给出醒目的"待重启"徽章提示。
+    const pendingRestart = plugin?.state === 'done_pending_restart';
 
     return h('div', { className: 'dshsu-sub' },
         // 小节标题：拼图图标 + 右侧版本号徽章（有新版时变琥珀色提示）
@@ -527,6 +534,8 @@ function PluginSection({ t, plugin, busy, checking, msg, onCheck, onUpgrade }) {
                 onClick: onUpgrade,
             }, t.upgradeNow),
             h('span', { className: 'dshsu-spacer' }),
+            // 待重启徽章：提醒用户重启 DeepSeek Harness 后新版本才会生效
+            pendingRestart ? h('span', { className: 'dshsu-pill dshsu-pill-new' }, t.pendingRestart) : null,
         ),
     );
 }
@@ -545,6 +554,7 @@ const FALLBACK_DICT = {
         pluginNav: '插件更新',
         pluginUpdating: '插件更新进行中…', checkingLabel: '正在检查更新…',
         checkFailed: '检查更新失败',
+        pendingRestart: '重启后生效',
         // 侧边导航文案：现在只有一张"版本更新"卡片。
         cardNav: '版本更新',
     },
@@ -556,6 +566,7 @@ const FALLBACK_DICT = {
         pluginNav: 'Plugin Updates',
         pluginUpdating: 'Plugin update in progress…', checkingLabel: 'Checking…',
         checkFailed: 'Check failed',
+        pendingRestart: 'Restart to apply',
         // Side navigation label: there is now only one "Updates" card.
         cardNav: 'Updates',
     },
@@ -659,12 +670,12 @@ function apply(ctx) {
         }
     }
 
-    /** 一键升级全部插件：受理成功后进入 2 秒高频轮询等结果。 */
+    /** 一键升级自身：v0.4.6 起服务保持运行，更新完成后提示重启生效。 */
     async function handlePluginUpgrade() {
         try {
             await api('/plugins/update', { method: 'POST', body: '{}' });
             pluginMsg = '';
-            // 服务即将退出；进入高频轮询等新进程起来后自动恢复进度展示。
+            // 后台任务运行期间高频轮询进度，直至出现 done_pending_restart / error 终态。
             setTimeout(pluginPollLoop, POLL_ACTIVE_MS);
         } catch (err) {
             console.warn(`[${NS}] 触发插件更新失败:`, err);
@@ -716,6 +727,7 @@ function apply(ctx) {
                 updateAvailable: dict('updateAvailable'), upgraded: dict('upgraded'), failed: dict('failed'),
                 pluginNav: dict('pluginNav'),
                 pluginUpdating: dict('pluginUpdating'), checkingLabel: dict('checkingLabel'),
+                pendingRestart: dict('pendingRestart'),
             },
             status: latestStatus,
             busy: isBusyState(latestStatus),

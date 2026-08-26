@@ -1,75 +1,29 @@
 /**
  * dsh-selfupdater 宿主入口：注册 HTTP 路由，桥接浏览器设置卡片与升级脚本。
  *
- * 职责边界：本文件只做"读状态 / 查版本 / 触发升级"，真正的
- * 下载-换目录-重启-回滚全部由分离进程 lib/updater.mjs 完成（原因：
- * 要替换的是 DSH 自己脚下的 node_modules，必须先让 DSH 退出）。
+ * 职责边界：
+ * - 主程序（@deepseek-ai/dsh）升级：要替换的是 DSH 自己脚下的 node_modules，
+ *   必须先让 DSH 退出，因此仍走分离进程 lib/updater.mjs（自杀→接管→复活链路）；
+ * - 插件（dsh-selfupdater 自己）更新：v0.4.6 起改为进程内原地安装
+ *   （lib/plugin-update-task.mjs），全程不杀宿主、不 rename profile，
+ *   完成后提示用户重启生效 —— 参照 dshmarket 的成熟做法，
+ *   规避与飞牛OS 守护进程拉起实例的端口竞态。
  *
  * 安全模型（与 dshmarket lib/http.js 完全一致）：
  * - POST 接口仅接受 same-origin 请求（Origin 与 Host 头一致）；
  * - 升级动作通过锁文件防并发，双端校验。
  */
 import { spawn } from 'node:child_process';
-import { createRequire } from 'node:module';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { fetchLatestVersion, installedSelfVersion, isNewer, runPluginUpdateTask } from './plugin-update-task.mjs';
 
 export const name = 'dsh-selfupdater';
 
 const PLUGIN_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 /** 要升级的主程序包名。 */
 const PKG = '@deepseek-ai/dsh';
-/** npm registry 查询超时。 */
-const FETCH_TIMEOUT_MS = 15000;
-/** 国内 npm 镜像（腾讯云），registry.npmjs.org 直连超时时的第一回退。 */
-const NPM_CHINA_MIRROR = 'https://mirrors.cloud.tencent.com/npm';
-/** 插件所在的 profile 名（与 runner.js 的 DSH_PLUGIN_PROFILE 约定一致）。 */
-const PLUGIN_PROFILE = process.env.DSH_PLUGIN_PROFILE ?? 'web';
-
-/* ------------------------------------------------------------------ *
- * semver 比较（零依赖，与 updater.mjs 内实现保持一致）
- * ------------------------------------------------------------------ */
-
-const SEMVER_RE = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/;
-
-function parseSemver(v) {
-    const m = SEMVER_RE.exec(String(v ?? '').trim());
-    if (m === null) return null;
-    return {
-        core: [Number(m[1]), Number(m[2]), Number(m[3])],
-        pre: m[4] === undefined ? [] : m[4].split('.'),
-    };
-}
-
-/** 返回负数/0/正数；任一侧非法返回 null。 */
-function compareVersions(a, b) {
-    const pa = parseSemver(a);
-    const pb = parseSemver(b);
-    if (pa === null || pb === null) return null;
-    for (let i = 0; i < 3; i++) {
-        if (pa.core[i] !== pb.core[i]) return pa.core[i] - pb.core[i];
-    }
-    if (pa.pre.length === 0 || pb.pre.length === 0) return pb.pre.length - pa.pre.length;
-    for (let i = 0; i < Math.max(pa.pre.length, pb.pre.length); i++) {
-        const x = pa.pre[i];
-        const y = pb.pre[i];
-        if (x === undefined) return -1;
-        if (y === undefined) return 1;
-        if (x === y) continue;
-        const nx = /^\d+$/.test(x);
-        const ny = /^\d+$/.test(y);
-        if (nx && ny) return Number(x) - Number(y);
-        if (nx !== ny) return nx ? -1 : 1;
-        return x < y ? -1 : 1;
-    }
-    return 0;
-}
-
-function isNewer(latest, installed) {
-    const cmp = compareVersions(latest, installed);
-    return cmp !== null && cmp > 0;
-}
 
 /* ------------------------------------------------------------------ *
  * HTTP 工具（照搬 dshmarket lib/http.js）
@@ -104,16 +58,6 @@ function sameOrigin(request) {
 /* ------------------------------------------------------------------ *
  * 状态与路径解析
  * ------------------------------------------------------------------ */
-
-/** 从 --profile 参数读取宿主实际启动的 profile（与 dshmarket 相同的兜底逻辑）。 */
-function argvProfile() {
-    const argv = process.argv;
-    const flag = argv.indexOf('--profile');
-    if (flag !== -1 && flag + 1 < argv.length && !argv[flag + 1].startsWith('-')) {
-        return argv[flag + 1];
-    }
-    return undefined;
-}
 
 /**
  * 定位 DSH 应用目录（node_modules 所在处）。
@@ -168,44 +112,6 @@ function currentDshVersion(appDir) {
     }
 }
 
-/**
- * 查询 npm registry 最新版本号（带镜像回退，参照 dshmarket regions.ts 的做法）：
- * 1. 优先走环境变量 DSHSU_REGISTRY_URL 指定的镜像（部署方可自行指定国内源）；
- * 2. 默认先试腾讯云国内镜像（飞牛OS 部署多在国内网络，直连 registry.npmjs.org
- *    经常超时——这正是"检查更新没反应"的常见原因）；
- * 3. 镜像失败后回退官方源，保证海外网络也能用。
- */
-async function fetchLatestVersion(pkg) {
-    const errors = [];
-    for (const base of registryCandidates()) {
-        try {
-            return await fetchFromRegistry(base, pkg);
-        } catch (err) {
-            errors.push(`${base}: ${err.message}`);
-        }
-    }
-    throw new Error(errors.join('；'));
-}
-
-/** 本次要依次尝试的 registry 地址列表（去重）。 */
-function registryCandidates() {
-    const custom = process.env.DSHSU_REGISTRY_URL?.replace(/\/+$/, '');
-    const list = [custom, NPM_CHINA_MIRROR, 'https://registry.npmjs.org'];
-    return [...new Set(list.filter((v) => typeof v === 'string' && v !== ''))];
-}
-
-/** 从单个 registry 取 latest 版本号。 */
-async function fetchFromRegistry(base, pkg) {
-    const res = await fetch(`${base}/${encodeURIComponent(pkg)}`, {
-        headers: { accept: 'application/json', 'user-agent': 'dsh-selfupdater' },
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const doc = await res.json();
-    const latest = doc?.['dist-tags']?.latest;
-    if (typeof latest !== 'string' || latest === '') throw new Error('未返回 latest');
-    return latest;
-}
 /** 读升级状态文件（不存在时返回空对象）。 */
 function readStatus(dshStateDir) {
     try {
@@ -232,7 +138,7 @@ function writeStatus(dshStateDir, payload) {
 }
 
 /* ------------------------------------------------------------------ *
- * 插件更新（与主程序升级共用同一入口，但走独立的状态/锁/升级脚本）
+ * 插件更新（自身一键更新；v0.4.6 起由进程内任务完成，见 plugin-update-task.mjs）
  * ------------------------------------------------------------------ */
 
 /** 读插件状态文件（不存在时返回空对象）。 */
@@ -254,21 +160,6 @@ function writePluginStatus(dshStateDir, payload) {
     }
 }
 
-/**
- * 读本插件自身的已装版本：优先 import 自己的 package.json（ESM 顶层 await
- * 不适合这里，改用 createRequire 同步读取），失败时回退硬编码兜底值。
- * 用途：让"检测更新"能覆盖 dsh-selfupdater 自己 —— 此前清单来自 profile
- * 的 dependencies，但"检测自己"语义上不依赖那份清单。
- */
-function readOwnVersion() {
-    try {
-        const require = createRequire(import.meta.url);
-        return require('../package.json').version;
-    } catch {
-        return '0.0.0';
-    }
-}
-
 /* ------------------------------------------------------------------ *
  * apply 入口
  * ------------------------------------------------------------------ */
@@ -286,9 +177,13 @@ export function apply(ctx) {
         const lockFile = join(dshStateDir, 'selfupdate.lock');
         const pluginLockFile = join(dshStateDir, 'pluginupdate.lock');
         const port = servicePort();
-        /** 本插件的包名与已装版本（用于"检测自己"的更新能力）。 */
+        /** 本插件的包名（用于"检测自己"的更新能力）。 */
         const SELF_NAME = name;
-        const SELF_INSTALLED = readOwnVersion();
+        /**
+         * 已安装的自身版本：每次请求实时读 profile 清单（而非模块加载时的快照）。
+         * 这样更新装好但宿主未重启时，UI 立即显示新版号，"检查更新"也不会误报。
+         */
+        const selfInstalled = () => installedSelfVersion(workspace);
 
         /** 升级是否正在进行（锁文件存在）。 */
         const isBusy = () => existsSync(lockFile);
@@ -411,11 +306,14 @@ export function apply(ctx) {
             const status = pluginStatusView();
             // 上次检查的缓存结果（latest / updateAvailable / checkedAt）存在 updates[SELF_NAME]。
             const cache = status.updates?.[SELF_NAME] ?? {};
+            const current = selfInstalled();
             sendJson(res, 200, {
                 name: SELF_NAME,
-                currentVersion: SELF_INSTALLED,
+                currentVersion: current,
                 latestVersion: cache.latestVersion ?? null,
-                updateAvailable: cache.updateAvailable === true,
+                // 检查缓存只对"已安装版本"有意义；若装好的新版还没重启
+                // （current 已是最新），就不能再按缓存说"有更新"。
+                updateAvailable: cache.updateAvailable === true && isNewer(cache.latestVersion, current),
                 lastCheck: cache.checkedAt ?? null,
                 busy: pluginBusy(),
                 state: status.state ?? 'idle',
@@ -433,21 +331,21 @@ export function apply(ctx) {
             // 只查自己这一个包，成功后把结果写入状态文件缓存。
             try {
                 const latestVersion = await fetchLatestVersion(SELF_NAME);
+                const hasUpdate = isNewer(latestVersion, selfInstalled());
                 writePluginStatus(dshStateDir, {
                     ...readPluginStatus(dshStateDir),
                     state: 'idle',
-                    message: isNewer(latestVersion, SELF_INSTALLED)
-                        ? `发现新版本 ${latestVersion}` : '当前已是最新',
+                    message: hasUpdate ? `发现新版本 ${latestVersion}` : '当前已是最新',
                     updates: {
                         [SELF_NAME]: {
                             latestVersion,
-                            updateAvailable: isNewer(latestVersion, SELF_INSTALLED),
+                            updateAvailable: hasUpdate,
                             checkedAt: new Date().toISOString(),
                         },
                     },
                     updatedAt: new Date().toISOString(),
                 });
-                sendJson(res, 200, { updatedCount: isNewer(latestVersion, SELF_INSTALLED) ? 1 : 0 });
+                sendJson(res, 200, { updatedCount: hasUpdate ? 1 : 0 });
             } catch (err) {
                 host.logger?.warn?.(`[dsh-selfupdater] 插件检查更新失败: ${err.message}`);
                 writePluginStatus(dshStateDir, {
@@ -461,6 +359,13 @@ export function apply(ctx) {
         });
 
         /* ---------- POST /dsh-selfupdater/plugins/update ---------- */
+        /**
+         * v0.4.6 重构：不再 spawn 分离脚本后 process.exit(0) 自杀。
+         * 旧链路（自杀→脚本接管→拉起 runner→健康检查→回滚）与飞牛OS
+         * 守护进程竞态，导致"更新失败+服务停摆+版本没变"。
+         * 新链路：202 应答后在本进程内原地安装新版（服务保持运行），
+         * 完成后状态置 done_pending_restart，由前端提示用户重启生效。
+         */
         registerRoute('POST', '/dsh-selfupdater/plugins/update', (req, res) => {
             if (!sameOrigin(req)) {
                 sendJson(res, 403, { error: 'untrusted request' });
@@ -474,7 +379,7 @@ export function apply(ctx) {
                 writePluginStatus(dshStateDir, {
                     ...readPluginStatus(dshStateDir),
                     state: 'running',
-                    message: '插件更新已受理，正在启动升级脚本…',
+                    message: '插件更新已受理…',
                     startedAt: new Date().toISOString(),
                 });
                 writeFileSync(pluginLockFile, JSON.stringify({ pid: process.pid, startedAt: Date.now(), by: 'plugin-update' }));
@@ -482,19 +387,11 @@ export function apply(ctx) {
                 sendJson(res, 500, { error: `写入锁文件失败：${err.message}` });
                 return;
             }
-            const child = spawn(process.execPath, [
-                join(PLUGIN_ROOT, 'lib', 'plugin-updater.mjs'),
-                '--pid', String(process.pid),
-                '--app-dir', appDir,
-                '--workspace', workspace,
-                '--port', String(port),
-            ], { detached: true, stdio: 'ignore', env: process.env });
-            child.unref();
-
-            host.logger?.info?.(`[dsh-selfupdater] 插件更新进程已启动 pid=${child.pid}，DSH 即将退出`);
-            // 与主程序升级一致：给 spawn 落稳时间后主动退出，让脚本接管重启链。
-            setTimeout(() => process.exit(0), 800);
-            sendJson(res, 202, { accepted: true, note: '插件更新将由分离脚本执行并自动重启服务' });
+            // fire-and-forget：任务自行写状态文件并释放锁，失败不影响应答。
+            void runPluginUpdateTask({ appDir, workspace, logger: host.logger })
+                .catch((err) => host.logger?.warn?.(`[dsh-selfupdater] 插件更新任务异常: ${err.message}`));
+            host.logger?.info?.('[dsh-selfupdater] 插件更新任务已在进程内启动（服务保持运行）');
+            sendJson(res, 202, { accepted: true, note: '更新在后台进行，完成后需重启 DeepSeek Harness 生效' });
         });
 
         host.logger?.info?.('[dsh-selfupdater] 路由已挂载');

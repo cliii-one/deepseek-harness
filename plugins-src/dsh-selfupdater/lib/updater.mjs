@@ -132,7 +132,7 @@ const args = parseArgs(process.argv);
 const appDir = resolve(String(args['app-dir'] ?? ''));
 /**
  * 工作区目录（存放 .dsh 状态目录）。
- * 与 index.js / plugin-updater.mjs 的推导链一致：共享目录 > HOME > TRIM_VAR > appDir。
+ * 与 index.js 的推导链一致：共享目录 > HOME > TRIM_VAR > appDir。
  * 正常情况下 index.js 已通过 --workspace 传入解析结果，这里仅兜底；
  * 不能只信 TRIM_VAR —— 飞牛部署时 .dsh 实际写在 $HOME（工作区）下。
  */
