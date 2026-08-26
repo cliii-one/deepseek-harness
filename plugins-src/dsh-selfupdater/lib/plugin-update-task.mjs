@@ -135,15 +135,26 @@ function readJson(file) {
     }
 }
 
-/** 读 profile 清单里记录的本插件版本声明（可能带 ^/~ 前缀）；无记录返回 null。 */
+/** 读 profile 清单里记录的本插件依赖声明（可能是 ^0.4.6，也可能是 file:/…tgz）；无记录返回 null。 */
 function profileDeclaredVersion(profileDir) {
     const dep = readJson(join(profileDir, 'package.json'))?.dependencies?.[SELF_NAME];
     return typeof dep === 'string' && dep !== '' ? dep : null;
 }
 
-/** 去掉 ^/~ 等范围前缀后比较是否等于目标版本。 */
-function declarationMatches(declared, expected) {
-    return declared.replace(/^[\^~>=<\s]+/, '') === expected;
+/**
+ * 读 profile 下 node_modules 里实际安装的自身版本 —— 唯一权威来源。
+ * FPK 等安装方式会把清单声明写成 file:/…tgz 而非版本号（0.4.6 就因此
+ * 把"当前版本"显示成了整个 tgz 路径，连带 isNewer 误判"已是最新"）；
+ * 且更新装好但宿主未重启时，也只有这里的 package.json 是新版本。读不到返回 null。
+ */
+function installedVersionFromModules(profileDir) {
+    const version = readJson(join(profileDir, 'node_modules', SELF_NAME, 'package.json'))?.version;
+    return typeof version === 'string' && version !== '' ? version : null;
+}
+
+/** 字符串是否为合法 semver（file: URL、git URL 等非法声明返回 false）。 */
+function isSemverString(v) {
+    return parseSemver(v) !== null;
 }
 
 /** 当前正在运行的自身版本（读本包 package.json；ESM 下用 createRequire 同步读）。 */
@@ -157,15 +168,29 @@ function runningVersion() {
 }
 
 /**
- * 已安装的自身版本（供"检查更新/状态展示"使用）。
- * 优先读 profile 清单 dependencies 里声明的版本：更新装好但宿主未重启时，
- * 它才是"已安装版本"，能让 UI 立即显示新版号并停止误报"发现新版本"；
- * 清单里没有记录时回退到正在运行的版本（首次安装/手工部署场景）。
+ * 解析"已安装的自身版本"（检查更新/状态展示/更新任务三方共用），三级兜底：
+ * 1. profile/node_modules 实际落盘的版本（权威；覆盖 file: 安装与未重启场景）；
+ * 2. 清单 dependencies 声明（仅当是合法 semver；file: 等 URL 声明不可用）；
+ * 3. 正在运行的版本（本地开发/异常兜底）。
+ */
+function resolveInstalledVersion(profileDir) {
+    const fromModules = installedVersionFromModules(profileDir);
+    if (fromModules !== null) return fromModules;
+    const declared = profileDeclaredVersion(profileDir);
+    if (declared !== null && isSemverString(declared.replace(/^[\^~>=<\s]+/, ''))) {
+        return declared.replace(/^[\^~>=<\s]+/, '');
+    }
+    return runningVersion();
+}
+
+/**
+ * 已安装的自身版本（供"检查更新/状态展示"路由使用）。
+ * 必须实时读盘而非模块加载时快照：更新装好但宿主未重启期间，
+ * UI 要立即显示新版号，"检查更新"也不能再误报"发现新版本"。
  */
 export function installedSelfVersion(workspace) {
     const profileDir = join(workspace, '.dsh', 'profiles', process.env.DSH_PLUGIN_PROFILE ?? 'web');
-    const declared = profileDeclaredVersion(profileDir);
-    return declared !== null ? declared.replace(/^[\^~>=<\s]+/, '') : runningVersion();
+    return resolveInstalledVersion(profileDir);
 }
 
 /** 定位 dsh CLI 入口：打包布局优先，其次 node_modules 标准布局。 */
@@ -268,10 +293,9 @@ export async function runPluginUpdateTask({ appDir, workspace, logger }) {
             rmSync(orphanBak, { recursive: true, force: true });
         }
 
-        /* 1. 确定当前版本：优先 profile 清单记录（更新后未重启时它才是新值），
-              无记录时退回正在运行的版本。 */
-        const declared = profileDeclaredVersion(profileDir);
-        const installed = declared !== null ? declared.replace(/^[\^~>=<\s]+/, '') : runningVersion();
+        /* 1. 确定当前版本：读实际落盘的 node_modules（权威来源，见
+              resolveInstalledVersion 注释——清单声明可能是 file:/…tgz）。 */
+        const installed = resolveInstalledVersion(profileDir);
         setState('running', '正在查询最新版本…', { startedAt: new Date().toISOString() });
 
         /* 2. 查询最新版本与下载地址。 */
@@ -300,13 +324,27 @@ export async function runPluginUpdateTask({ appDir, workspace, logger }) {
             INSTALL_TIMEOUT_MS,
         );
 
-        /* 6. 校验：清单版本号一致 + 入口文件真实落盘。 */
-        const after = profileDeclaredVersion(profileDir);
-        if (after === null || !declarationMatches(after, release.version)) {
-            throw new Error(`安装后清单版本异常：期望 ${release.version}，实际 ${after ?? '缺失'}`);
+        /* 6. 校验：实际落盘版本一致 + 入口文件存在。
+              不读清单声明——本地 tgz 安装会把声明写成 file: 指向暂存文件，不可靠。 */
+        const installedNow = installedVersionFromModules(profileDir);
+        if (installedNow !== release.version) {
+            throw new Error(`安装后版本异常：期望 ${release.version}，实际 ${installedNow ?? '未安装'}`);
         }
         if (!existsSync(join(profileDir, 'node_modules', SELF_NAME, 'lib', 'index.js'))) {
             throw new Error('入口文件未落盘，安装可能不完整');
+        }
+
+        /* 6.5 修正清单声明：dsh plugin add 装本地 tgz 会把依赖写成 file: 指向
+              暂存文件，而暂存文件随后会被删除（引用悬空）；改写为精确版本号，
+              保证下次重建依赖时能从 registry 正常解析。失败不影响本次安装。 */
+        try {
+            const manifest = readJson(manifestPath);
+            if (manifest.dependencies?.[SELF_NAME] !== release.version) {
+                manifest.dependencies = { ...manifest.dependencies, [SELF_NAME]: release.version };
+                writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+            }
+        } catch (err) {
+            warnLog(`清单声明修正失败（不影响已安装文件）: ${err.message}`);
         }
 
         /* 7. 成功：不重启宿主，提示用户重启使新版本生效。 */
