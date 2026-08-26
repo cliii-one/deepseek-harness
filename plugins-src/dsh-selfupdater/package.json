@@ -1,6 +1,6 @@
 {
   "name": "dsh-selfupdater",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Self-update plugin for DeepSeek Harness: check npm for newer @deepseek-ai/dsh, swap node_modules atomically, restart, health-check and roll back on failure. DSH 主程序自更新插件。",
   "license": "MIT",
   "type": "module",

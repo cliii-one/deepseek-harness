@@ -5,8 +5,8 @@
  * 下载-换目录-重启-回滚全部由分离进程 lib/updater.mjs 完成（原因：
  * 要替换的是 DSH 自己脚下的 node_modules，必须先让 DSH 退出）。
  *
- * 安全模型（照搬 dshmarket restart.js 的做法）：
- * - POST 接口仅接受 same-origin 且无代理转发痕迹的 loopback 请求；
+ * 安全模型（与 dshmarket lib/http.js 完全一致）：
+ * - POST 接口仅接受 same-origin 请求（Origin 与 Host 头一致）；
  * - 升级动作通过锁文件防并发，双端校验。
  */
 import { spawn } from 'node:child_process';
@@ -80,35 +80,20 @@ function sendJson(response, code, payload) {
 }
 
 /**
- * 同源校验：Origin 的主机部分必须与 Host 或 x-forwarded-host 一致。
- * 经 runner.js 透明反代访问时，DSH 实际收到的 Host 已被改写为
- * 127.0.0.1:<DSH_PORT>，原始访问主机名在 x-forwarded-host 里；
- * 两个都比对才能同时覆盖"直连"与"反代"两种部署形态。
+ * 同源校验（与 dshmarket lib/http.js 完全一致）：Origin 的 host 部分必须
+ * 与请求头 Host 一致。经 runner.js 透明反代访问时，反代会把 Origin 与 Host
+ * 统一改写为 http://127.0.0.1:<DSH_PORT>，两者天然相等，校验照常通过；
+ * 直连场景下两者本来就相同。跨站伪造请求的 Origin 是外部地址，会被拒绝。
  */
 function sameOrigin(request) {
     const origin = request.headers.origin;
-    if (origin === undefined) return false;
-    let originHost;
+    const host = request.headers.host;
+    if (origin === undefined || host === undefined) return false;
     try {
-        originHost = new URL(origin).host;
+        return new URL(origin).host === host;
     } catch {
         return false;
     }
-    const candidates = [request.headers.host, request.headers['x-forwarded-host']];
-    return candidates.some((h) => typeof h === 'string' && h.split(',')[0].trim() === originHost);
-}
-
-/**
- * 可信请求判定：仅接受来自 loopback 的连接，且 Origin 必须与 Host 一致。
- * 注意：不能把"存在代理转发头"当作拒绝理由 —— 本部署中 DSH 只监听
- * 127.0.0.1，浏览器流量全部经过 runner.js 的透明反代，而该代理会固定
- * 附加 x-forwarded-for；若因此拒绝，所有正常浏览器请求都会被误杀。
- * 两道防线足够：来源必须是本机回环 + 同源校验防跨站伪造。
- */
-function trustedRequest(request) {
-    const address = request.socket.remoteAddress;
-    if (address !== '127.0.0.1' && address !== '::1' && address !== '::ffff:127.0.0.1') return false;
-    return sameOrigin(request);
 }
 
 /* ------------------------------------------------------------------ *
@@ -200,24 +185,23 @@ export function apply(ctx) {
         const isBusy = () => existsSync(lockFile);
 
         /**
-         * 注册一个路由的极简包装。webServer 服务提供 on/register 接口；
-         * 兼容 dshmarket 所用 host.route / host.on('request') 两种形态，
-         * 以运行时探测为准，不假设具体 API。
+         * 注册一个精确匹配的路由（照搬 dshmarket 的挂载方式）。
+         * webServer.register({ kind:'exact', path, handler }) 返回反注册函数；
+         * method 分发由 handler 自行完成，与 dshmarket 各路由的做法一致。
          */
-        function registerRoute(method, pathPrefix, handler) {
-            // 形态一：host.route({method, path}, handler)
-            if (typeof host.route === 'function') {
-                return host.route({ method, path: pathPrefix }, handler);
-            }
-            // 形态二：host.on('request', cb)，自行按 method+path 分发
-            if (typeof host.on === 'function') {
-                return host.on('request', (req, res) => {
-                    const url = (req.url ?? '/').split('?')[0];
-                    if (req.method === method && url === pathPrefix) void handler(req, res);
-                });
-            }
-            host.logger?.warn('[dsh-selfupdater] webServer 未暴露已知路由接口，插件功能不可用');
-            return () => {};
+        function registerRoute(method, path, handler) {
+            return host.webServer.register({
+                kind: 'exact',
+                path,
+                handler: async (request, response) => {
+                    if (request.method !== method) {
+                        response.writeHead(405, { allow: method });
+                        response.end();
+                        return;
+                    }
+                    await handler(request, response);
+                },
+            });
         }
 
         /* ---------- GET /dsh-selfupdater/status ---------- */
@@ -235,7 +219,7 @@ export function apply(ctx) {
 
         /* ---------- POST /dsh-selfupdater/check ---------- */
         registerRoute('POST', '/dsh-selfupdater/check', async (req, res) => {
-            if (!trustedRequest(req)) {
+            if (!sameOrigin(req)) {
                 sendJson(res, 403, { error: 'untrusted request' });
                 return;
             }
@@ -265,7 +249,7 @@ export function apply(ctx) {
 
         /* ---------- POST /dsh-selfupdater/perform ---------- */
         registerRoute('POST', '/dsh-selfupdater/perform', (req, res) => {
-            if (!trustedRequest(req)) {
+            if (!sameOrigin(req)) {
                 sendJson(res, 403, { error: 'untrusted request' });
                 return;
             }
