@@ -128,9 +128,30 @@ function resolveAppDir() {
     throw new Error(`无法定位 ${PKG} 的应用目录`);
 }
 
-/** 解析工作区目录（与 runner.js 的优先级一致）。 */
+/**
+ * 解析工作区目录（插件清单 .dsh/profiles 的真正落盘处）。
+ * 与 runner.js 的推导链保持一致：
+ * 1. TRIM_DATA_SHARE_PATHS 第一个共享目录（飞牛声明的工作区，runner 会优先用它）；
+ * 2. HOME 环境变量（runner 启动 DSH 时把 HOME 指到工作区，DSH 的 profile 就在 $HOME/.dsh 下）；
+ * 3. TRIM_VAR / appDir/data 兜底（本地开发场景）。
+ * 注意：不能只看 TRIM_VAR —— 飞牛部署时它指向 app data 目录而非共享目录，
+ * 而 DSH 实际把 profiles 写在 HOME/.dsh 下；此前只读 TRIM_VAR 导致
+ * "版本更新"卡片始终显示"未发现已安装插件"。
+ */
 function resolveWorkspace(appDir) {
-    return resolve(process.env.TRIM_VAR ?? appDir);
+    const shares = (process.env.TRIM_DATA_SHARE_PATHS ?? '').split(':').map((s) => s.trim()).filter(Boolean);
+    const candidates = [
+        ...shares,
+        process.env.HOME ?? '',
+        process.env.TRIM_VAR ?? '',
+        join(appDir, 'data'),
+    ].filter((v) => v !== '');
+    // 候选目录下若已存在 .dsh 则视为工作区，立即采用；
+    // 否则按 runner.js 同样的优先级取第一个候选（与实际落盘位置保持一致）。
+    for (const dir of candidates) {
+        if (existsSync(join(dir, '.dsh'))) return resolve(dir);
+    }
+    return resolve(candidates[0] ?? appDir);
 }
 
 /** 服务端口：与 runner.js 保持一致的环境变量与默认值。 */
@@ -441,11 +462,8 @@ export function apply(ctx) {
                 { name: SELF_NAME, installedVersion: SELF_INSTALLED },
                 ...listInstalledPlugins(workspace).filter((p) => p.name !== SELF_NAME),
             ];
-            if (installed.length === 0) {
-                sendJson(res, 200, { plugins: [], note: '未发现已安装插件' });
-                return;
-            }
-            // 并发查询所有插件的 npm 最新版；单个失败不拖垮整体。
+            // 并发查询所有插件（清单已保证至少包含自己，不可能为空）的最新版；
+            // 单个失败不拖垮整体。
             const results = await Promise.allSettled(installed.map(async (p) => {
                 const latestVersion = await fetchPluginLatest(p.name);
                 return {

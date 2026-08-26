@@ -122,8 +122,20 @@ const args = parseArgs(process.argv);
 
 /** DSH 应用目录（含 bin/node 与 node_modules/@deepseek-ai/dsh）。 */
 const appDir = resolve(String(args['app-dir'] ?? ''));
-/** 工作区目录（存放 .dsh 状态目录与插件 profile）。 */
-const workspace = resolve(String(args.workspace ?? process.env.TRIM_VAR ?? appDir));
+/**
+ * 工作区目录（存放 .dsh 状态目录与插件 profile）。
+ * 与 index.js 的 resolveWorkspace 推导链一致：共享目录 > HOME > TRIM_VAR > appDir。
+ * index.js 已解析出正确 workspace 并通过 --workspace 传入，这里仅在参数缺失时兜底；
+ * 不能只信 TRIM_VAR —— 飞牛部署时 profiles 实际写在 $HOME/.dsh 下。
+ */
+const workspace = (() => {
+    if (args.workspace) return resolve(String(args.workspace));
+    const shares = (process.env.TRIM_DATA_SHARE_PATHS ?? '').split(':').map((s) => s.trim()).filter(Boolean);
+    for (const dir of [...shares, process.env.HOME ?? '', process.env.TRIM_VAR ?? '', appDir]) {
+        if (dir !== '' && existsSync(join(dir, '.dsh'))) return resolve(dir);
+    }
+    return resolve(shares[0] ?? process.env.HOME ?? process.env.TRIM_VAR ?? appDir);
+})();
 /** Web 服务端口，健康检查用。 */
 const port = parseInt(String(args.port ?? process.env.DSH_PORT ?? '3081'), 10);
 

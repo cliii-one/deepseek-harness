@@ -130,8 +130,20 @@ const args = parseArgs(process.argv);
 
 /** DSH 应用目录（含 node_modules / bin/runner.js），由插件本体解析后传入。 */
 const appDir = resolve(String(args['app-dir'] ?? ''));
-/** 工作区目录（存放 .dsh 状态目录）。 */
-const workspace = resolve(String(args.workspace ?? process.env.TRIM_VAR ?? appDir));
+/**
+ * 工作区目录（存放 .dsh 状态目录）。
+ * 与 index.js / plugin-updater.mjs 的推导链一致：共享目录 > HOME > TRIM_VAR > appDir。
+ * 正常情况下 index.js 已通过 --workspace 传入解析结果，这里仅兜底；
+ * 不能只信 TRIM_VAR —— 飞牛部署时 .dsh 实际写在 $HOME（工作区）下。
+ */
+const workspace = (() => {
+    if (args.workspace) return resolve(String(args.workspace));
+    const shares = (process.env.TRIM_DATA_SHARE_PATHS ?? '').split(':').map((s) => s.trim()).filter(Boolean);
+    for (const dir of [...shares, process.env.HOME ?? '', process.env.TRIM_VAR ?? '', appDir]) {
+        if (dir !== '' && existsSync(join(dir, '.dsh'))) return resolve(dir);
+    }
+    return resolve(shares[0] ?? process.env.HOME ?? process.env.TRIM_VAR ?? appDir);
+})();
 /** Web 服务端口，健康检查用。 */
 const port = parseInt(String(args.port ?? process.env.DSH_PORT ?? '3081'), 10);
 /** 要升级的包名。 */
