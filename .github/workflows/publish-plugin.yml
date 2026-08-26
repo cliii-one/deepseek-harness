@@ -1,0 +1,75 @@
+# dsh-selfupdater 自动发布工作流
+#
+# 触发条件（满足任一）：
+# 1. plugins-src/dsh-selfupdater/** 有变更被推送到 main —— 按路径自动触发；
+#    配合"发版 = 改 package.json 版本号 + push"的极简流程。
+# 2. 手动触发（workflow_dispatch），可在 Actions 页面选插件目录执行。
+#
+# 幂等性：发布前用 `npm view dsh-selfupdater version` 对比本地版本号，
+# 若 npm 上已是同版本则跳过发布（exit 0），避免重复推送导致工作流红叉。
+
+name: Publish dsh-selfupdater
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'plugins-src/dsh-selfupdater/**'
+      - '.github/workflows/publish-plugin.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: 发布到公共 npm
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: plugins-src/dsh-selfupdater
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: 检查 NPM_TOKEN 是否已配置
+        id: token_check
+        run: |
+          # 首次使用前需在仓库 Settings → Secrets → Actions 配置 NPM_TOKEN；
+          # 未配置时跳过发布，避免工作流直接红叉。
+          if [ -z "${{ secrets.NPM_TOKEN }}" ]; then
+            echo "::warning::尚未配置 NPM_TOKEN secret，跳过发布"
+            echo "configured=false" >> $GITHUB_OUTPUT
+          else
+            echo "configured=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 判断是否需要发布（版本号幂等检查）
+        id: guard
+        run: |
+          LOCAL_VERSION=$(node -p "require('./package.json').version")
+          echo "本地版本: ${LOCAL_VERSION}"
+
+          # 远端不存在该包（首次发布）时 npm view 会非零退出，视为需要发布
+          REMOTE_VERSION=$(npm view dsh-selfupdater version 2>/dev/null || echo "none")
+          echo "npm 远端版本: ${REMOTE_VERSION}"
+
+          if [ "$LOCAL_VERSION" = "$REMOTE_VERSION" ]; then
+            echo "版本未变化，跳过发布"
+            echo "should_publish=false" >> $GITHUB_OUTPUT
+          else
+            echo "版本有变化，执行发布"
+            echo "should_publish=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 发布到 npm
+        if: steps.token_check.outputs.configured == 'true' && steps.guard.outputs.should_publish == 'true'
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
