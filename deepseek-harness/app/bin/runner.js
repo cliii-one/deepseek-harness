@@ -229,8 +229,12 @@ function installBundledPlugins() {
     for (const tgz of plugins) {
         const { name: pkgName, version: seedVer } = parseTgzName(tgz);
         const installedVer = getInstalledPluginVersion(profileDir, pkgName);
-        if (installedVer && (!seedVer || installedVer === seedVer)) continue; // 幂等：同版本已装则跳过
-        console.log(`[Runner] 正在内置安装插件: ${tgz}${installedVer ? `（升级：${installedVer} -> ${seedVer}）` : ''} -> profile "${DSH_PLUGIN_PROFILE}"...`);
+        // 幂等规则：只有"种子 tgz 版本与已装版本一致"时才跳过重装；
+        // 种子随应用包升级出新版本（installedVer < 或 != seedVer）时必须重装，
+        // 否则应用升级后 profile 里永远停留在旧插件 —— 这正是
+        // "升级了 FPK 但 dsh-selfupdater 仍是旧版"的根因。
+        if (installedVer && seedVer && installedVer === seedVer) continue;
+        console.log(`[Runner] 正在内置安装插件: ${tgz}${installedVer ? `（当前 ${installedVer} -> 目标 ${seedVer ?? 'unknown'}）` : ''} -> profile "${DSH_PLUGIN_PROFILE}"...`);
         // dsh plugin add <tgz>：与手动执行 `dsh plugin --profile web add xxx` 等价
         const r = spawnSync(NODE_BIN, [DSH_BIN, 'plugin', '--profile', DSH_PLUGIN_PROFILE, 'add', path.join(seedDir, tgz)], {
             cwd: WORKSPACE_DIR,

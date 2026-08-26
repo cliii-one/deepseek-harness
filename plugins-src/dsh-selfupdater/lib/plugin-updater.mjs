@@ -371,6 +371,7 @@ async function main() {
     renameSync(profileDir, bakProfileDir);
     // 注意：不再立即还原备份！备份目录需要保留到更新成功完成，
     // 这样如果更新失败，rollback() 函数才能从备份恢复。
+    mkdirSync(profileDir, { recursive: true });
     mkdirSync(stagingDir, { recursive: true });
 
     // 阶段三：逐个下载 tgz 并离线安装；任一失败立即整体回滚。
