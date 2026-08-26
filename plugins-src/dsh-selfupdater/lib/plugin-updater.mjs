@@ -328,36 +328,25 @@ async function main() {
     // 锁文件双端校验：路由触发前会检查；这里再补一道防手动重复执行。
     if (existsSync(lockFile)) throw new Error('已有一次插件更新在进行中（锁文件存在）');
 
-    // 读已安装清单：profile/package.json 的 dependencies 是最权威的数据源；
-    // 再补上本插件自身（dsh-selfupdater），保证"自己也能被更新"。
-    let deps;
-    try {
-        deps = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8')).dependencies ?? {};
-    } catch {
-        deps = {};
-    }
-    /** 本插件自身的已装版本：直接读自己脚本身旁的 package.json，最可靠。 */
+    /**
+     * 只更新本插件自身（dsh-selfupdater）：其他插件已有各自的更新渠道，
+     * 不再扫描 profile 的 dependencies 清单。
+     * 已装版本直接读自己脚本身旁的 package.json，最可靠。
+     */
     let selfVersion = '';
     try {
         selfVersion = JSON.parse(
             readFileSync(new URL('./../package.json', import.meta.url), 'utf8'),
         ).version ?? '';
-    } catch { /* 读不到则跳过自更 */ }
-    const installed = Object.entries(deps).map(([name, range]) => ({
-        name,
-        version: String(range).replace(/^[~^]\s*/, ''),
-    })).filter((p) => p.version !== '' && p.name !== 'dsh-selfupdater');
-    if (selfVersion !== '') {
-        installed.unshift({ name: 'dsh-selfupdater', version: selfVersion });
+    } catch { /* 读不到版本号则无事可做 */ }
+    if (selfVersion === '') {
+        setState('error', '无法读取 dsh-selfupdater 自身版本号，更新中止');
+        finish(1);
     }
-
-    if (installed.length === 0) {
-        setState('idle', '未发现已安装插件，无需更新');
-        finish(0);
-    }
+    const installed = [{ name: 'dsh-selfupdater', version: selfVersion }];
 
     status = { startedAt: new Date().toISOString(), trigger: 'manual' };
-    setState('downloading', '正在查询各插件的最新版本 …');
+    setState('downloading', '正在查询 dsh-selfupdater 的最新版本 …');
 
     // 阶段一：并发查询每个插件的 latest，筛出真正有新版可升的子集。
     const checks = await Promise.allSettled(installed.map(async (p) => ({ ...p, info: await fetchLatest(p.name) })));
@@ -371,7 +360,7 @@ async function main() {
         if (isNewer(info.latest, version)) pending.push({ name, currentVersion: version, targetVersion: info.latest, tgzUrl: info.tgzUrl });
     }
     if (pending.length === 0) {
-        setState('idle', '所有插件均已是最新版本');
+        setState('idle', 'dsh-selfupdater 已是最新版本');
         finish(0);
     }
     log(`待更新插件：${pending.map((p) => `${p.name}@${p.currentVersion}->${p.targetVersion}`).join(', ')}`);
@@ -414,7 +403,7 @@ async function main() {
         rmSync(stagingDir, { recursive: true, force: true });
         // bak 目录保留一次作为手动救砖手段，下次升级前会自动清理。
         setState('done',
-            `插件更新完成：${updated.map((p) => p.name).join(', ')}`,
+            `插件更新完成：dsh-selfupdater@${updated[0]?.targetVersion ?? ''}`,
             { finishedAt: new Date().toISOString() });
     } else {
         await rollback();

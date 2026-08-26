@@ -224,14 +224,6 @@ const CARD_CSS = `
 .dshsu-pill{font-size:12px;padding:2px 9px;border-radius:999px;white-space:nowrap}
 .dshsu-pill-ok{color:var(--dshsu-success);background:var(--dshsu-success-soft)}
 .dshsu-pill-bad{color:var(--dshsu-danger);background:var(--dshsu-danger-soft)}
-/* ---- 插件更新卡片专用 ---- */
-.dshsu-plist{display:grid;gap:8px;background:var(--dshsu-subtle);border-radius:8px;padding:10px 12px}
-.dshsu-prow{display:flex;align-items:center;gap:10px;font-size:13px;min-width:0}
-.dshsu-pmain{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1}
-.dshsu-pname{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.dshsu-pver{color:var(--dshsu-muted);font-size:12px;font-variant-numeric:tabular-nums}
-.dshsu-empty{font-size:13px;color:var(--dshsu-muted)}
-.dshsu-pill-new{color:var(--dshsu-warn);background:var(--dshsu-warn-soft)}
 /* ---- 单卡片内两个小节之间的分隔线（随主题换肤） ---- */
 .dshsu-divider{height:1px;background:var(--dshsu-border);margin:4px 0}
 /* 单卡片内的插件小节容器：只负责纵向排布，不画边框（边框属于整张卡片）。 */
@@ -309,40 +301,54 @@ function StepBar({ state }) {
 }
 
 /**
- * 更新图标：SVG 循环箭头（语义 = 刷新/更新），stroke 用 currentColor
- * 自动跟随文字颜色，亮暗主题都无需额外处理。
+ * 小节标题图标（SVG，fill 用 currentColor 自动跟随主题文字色）：
+ * - RocketIcon：火箭升空，语义 = 发版/升级，用于 DSH 更新小节；
+ * - PuzzleIcon：拼图块，语义 = 插件，用于插件更新小节。
+ * （旧版圆形箭头在小尺寸下形似齿轮、辨识度差，故换成语义更直白的图标。）
  */
-function UpdateIcon() {
-    return h('svg', {
+const ICON_ROCKET_D = 'M9.19 6.35c-2.04 2.29-3.44 5.58-3.57 5.89L2 10.69l4.05-4.05'
+    + 'c.47-.47 1.15-.68 1.81-.55l1.33.26zM11.17 17s3.74-1.55 5.89-3.7'
+    + 'c5.4-5.4 4.5-9.62 4.21-10.57-.95-.3-5.17-1.19-10.57 4.21C8.55 9.09 7 12.83 7 12.83L11.17 17zm6.48-2.19'
+    + 'c-2.29 2.04-5.58 3.44-5.89 3.57L13.31 22l4.05-4.05c.47-.47.68-1.15.55-1.81l-.26-1.33zM9 18'
+    + 'c0 .83-.34 1.58-.88 2.12C6.94 21.3 2 22 2 22s.7-4.94 1.88-6.12A2.996 2.996 0 0 1 9 18zm3-6'
+    + 'c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2z';
+const ICON_PUZZLE_D = 'M20.5 11H19V7c0-1.1-.9-2-2-2h-4V3.5C13 2.12 11.88 1 10.5 1S8 2.12 8 3.5V5H4'
+    + 'c-1.1 0-1.99.9-1.99 2v3.8H3.5c1.49 0 2.7 1.21 2.7 2.7s-1.21 2.7-2.7 2.7H2V19c0 1.1.9 2 2 2h3.8v-1.5'
+    + 'c0-1.49 1.21-2.7 2.7-2.7 1.49 0 2.7 1.21 2.7 2.7V21H17c1.1 0 2-.9 2-2v-4h1.5'
+    + 'c1.38 0 2.5-1.12 2.5-2.5S21.88 11 20.5 11z';
+
+/** 图标组件工厂：同一份 SVG 外壳，只换路径数据，避免重复样板代码。 */
+function svgIcon(pathD) {
+    return () => h('svg', {
         className: 'dshsu-icon',
         viewBox: '0 0 24 24',
         width: 15,
         height: 15,
         'aria-hidden': true,
-    },
-    // 上半圈箭头 + 下半圈箭头组成循环，Material Design "autorenew" 造型。
-    h('path', {
-        d: 'M12 5V2L8 6l4 4V7a5 5 0 1 1-5 5H5a7 7 0 1 0 7-7z',
-        fill: 'currentColor',
-    }));
+    }, h('path', { d: pathD, fill: 'currentColor' }));
 }
+
+/** DSH 更新小节标题图标（火箭）。 */
+const RocketIcon = svgIcon(ICON_ROCKET_D);
+/** 插件更新小节标题图标（拼图块）。 */
+const PuzzleIcon = svgIcon(ICON_PUZZLE_D);
 
 /* ------------------------------------------------------------------ *
  * 小节标题条：图标 + 名称 + 右侧徽章（单卡片内两个小节共用）
  * ------------------------------------------------------------------ */
 
 /**
- * 小节标题：左侧小圆点图标 + 标题文字，右侧可选徽章。
+ * 小节标题：左侧图标（默认火箭，可传入其他图标）+ 标题文字，右侧可选徽章。
  * 用于把"DSH 更新"和"插件更新"收纳在同一张卡片内分区展示。
  */
-function SectionHead({ title, badge, badgeNew }) {
+function SectionHead({ title, icon, badge }) {
     return h('div', { className: 'dshsu-head' },
-        h('div', { className: 'dshsu-title' }, h(UpdateIcon), h('span', null, title)),
+        h('div', { className: 'dshsu-title' }, icon ?? h(RocketIcon), h('span', null, title)),
         badge ?? null,
     );
 }
 
-/** 顶部徽章的两种形态：可更新（琥珀色）/ 普通（灰色计数）。 */
+/** 小节标题右侧徽章的两种形态：可更新（琥珀色）/ 普通（灰色版本号）。 */
 function headBadge(text, isNew) {
     if (text == null) return null;
     return h('span', { className: `dshsu-chip${isNew ? ' dshsu-chip-new' : ''}` }, text);
@@ -354,21 +360,16 @@ function headBadge(text, isNew) {
  * 两组状态相互独立、互不阻塞；样式共享同一套 CSS 类与主题变量。
  */
 function UpdateCard({ t, status, busy, checking, onCheck, onUpgrade,
-    plugins, pluginBusy, pluginChecking, pluginMsg, onPluginCheck, onPluginUpgrade }) {
+    plugin, pluginBusy, pluginChecking, pluginMsg, onPluginCheck, onPluginUpgrade }) {
 
     const updateAvailable = status?.latestVersion != null
         && status.latestVersion !== status.currentVersion;
     const stage = STATE_LABELS[status?.state] ?? '';
-    const updateCount = plugins.filter((p) => p.updateAvailable).length;
 
     // DSH 小节结果消息的语义着色：成功绿 / 失败红 / 其余灰。
     const message = !busy && status?.message ? String(status.message) : '';
     const msgClass = /已是最新|发现新版本|成功|完成/.test(message) ? ' dshsu-msg-ok'
         : /失败|出错|错误/.test(message) || ['error', 'done_failed'].includes(status?.state) ? ' dshsu-msg-bad'
-            : '';
-    // 插件小节结果消息的语义着色，规则同上。
-    const pMsgClass = /已是最新|完成|成功/.test(pluginMsg) ? ' dshsu-msg-ok'
-        : /失败|出错|错误|超时/.test(pluginMsg) ? ' dshsu-msg-bad'
             : '';
 
     return h('div', { className: 'dshsu-card' },
@@ -432,7 +433,7 @@ function UpdateCard({ t, status, busy, checking, onCheck, onUpgrade,
         /* ============ 小节二：插件更新（复用 PluginSection） ============ */
         h(PluginSection, {
             t,
-            plugins,
+            plugin,
             busy: pluginBusy,
             checking: pluginChecking,
             msg: pluginMsg,
@@ -454,74 +455,61 @@ function formatTime(iso) {
 
 /* ------------------------------------------------------------------ *
  * 插件更新小节（渲染在"版本更新"卡片下半部分）：
- * 列出已装插件 + 检查更新 + 一键全部升级
+ * 只针对本插件（dsh-selfupdater）自身的检测与升级，
+ * 展示模板与 DSH 小节同款三行：当前版本 / 最新版本 / 上次检查。
  * ------------------------------------------------------------------ */
 
 /** 插件更新进行中的状态集合（与后端锁文件/state 约定一致）。 */
 const PLUGIN_BUSY_STATES = ['running', 'downloading', 'restarting', 'healthcheck', 'rollback'];
 
 /**
- * 插件列表行：包名 + 当前→最新版本 + 可更新徽章。
- * @param p - 单个插件条目 { name, installedVersion, latestVersion, updateAvailable }
- * @param t - 文案对象
+ * 插件更新小节：数据契约与 DSH 小节一致
+ * （currentVersion / latestVersion / lastCheck / updateAvailable），
+ * 标题右侧徽章显示当前 dsh-selfupdater 版本号，有新版时换成琥珀色可更新徽章。
+ * @param props - plugin 单条自身数据；busy 更新进行中；checking 检查中；
+ *               msg 结果消息；onCheck/onUpgrade 事件回调
  */
-function PluginRow({ p, t }) {
-    return h('div', { className: 'dshsu-prow' },
-        h('div', { className: 'dshsu-pmain' },
-            h('span', {
-                className: 'dshsu-pname',
-                title: p.name,
-            }, p.name),
-            // 版本行：有新版时显示"当前 → 最新"，一眼看出升级去向。
-            h('span', { className: 'dshsu-pver' },
-                p.updateAvailable && p.latestVersion != null
-                    ? `${p.installedVersion ?? '?'} → ${p.latestVersion}`
-                    : (p.installedVersion ?? '?'),
-            ),
-        ),
-        p.updateAvailable
-            ? h('span', { className: 'dshsu-pill dshsu-pill-new' }, t.updateAvailable)
-            : (p.latestVersion != null ? h('span', { className: 'dshsu-pill dshsu-pill-ok' }, t.upToDate) : null),
-    );
-}
-
-/**
- * 插件更新小节（由 UpdateCard 内嵌渲染，不再单独注册卡片）：
- * 列出已装插件 + 检查更新 + 一键全部升级。
- * 注意：外层容器用轻量 div 而非再套一层 dshsu-card，
- * 避免卡片套卡片的嵌套边框；标题条复用 SectionHead 统一风格。
- * @param props - plugins 插件数组；busy 是否有插件更新在跑；
- *               checking 是否正在检查；msg 结果消息；各事件回调
- */
-function PluginSection({ t, plugins, busy, checking, msg, onCheck, onUpgrade }) {
-    const updateCount = plugins.filter((p) => p.updateAvailable).length;
+function PluginSection({ t, plugin, busy, checking, msg, onCheck, onUpgrade }) {
+    const updateAvailable = plugin?.updateAvailable === true;
     // 结果消息的语义着色：成功绿 / 失败红 / 其余灰。
     const msgClass = /已是最新|完成|成功/.test(msg) ? ' dshsu-msg-ok'
         : /失败|出错|错误|超时/.test(msg) ? ' dshsu-msg-bad'
             : '';
 
     return h('div', { className: 'dshsu-sub' },
-        // 小节标题：与 DSH 部分同款 SectionHead，右侧显示计数徽章
+        // 小节标题：拼图图标 + 右侧版本号徽章（有新版时变琥珀色提示）
         h(SectionHead, {
             title: t.pluginNav,
-            badge: updateCount > 0
-                ? headBadge(`${updateCount} ${t.updatesSuffix}`, true)
-                : headBadge(`${plugins.length} ${t.pluginsSuffix}`, false),
+            icon: h(PuzzleIcon),
+            badge: updateAvailable && plugin.latestVersion != null
+                ? headBadge(`${t.updateAvailable} ${plugin.latestVersion}`, true)
+                : headBadge(plugin?.currentVersion ?? '—', false),
         }),
-        // 插件清单（空态给提示）
-        h('div', { className: 'dshsu-plist' },
-            plugins.length > 0
-                ? plugins.map((p) => h(PluginRow, { key: p.name, p, t }))
-                : h('div', { className: 'dshsu-empty' }, t.noPlugins),
+        // 三行模板与 DSH 小节完全同款：当前版本 / 最新版本 / 上次检查
+        h('div', { className: 'dshsu-rows' },
+            h('div', { className: 'dshsu-row' },
+                h('span', { className: 'dshsu-label' }, t.currentVersion),
+                h('span', { className: 'dshsu-value' }, plugin?.currentVersion ?? '—'),
+            ),
+            h('div', { className: 'dshsu-row' },
+                h('span', { className: 'dshsu-label' }, t.latestVersion),
+                h('span', {
+                    className: updateAvailable ? 'dshsu-value dshsu-value-new' : 'dshsu-value',
+                }, plugin?.latestVersion ?? '—'),
+            ),
+            h('div', { className: 'dshsu-row' },
+                h('span', { className: 'dshsu-label' }, t.lastCheck),
+                h('span', { className: 'dshsu-value' }, formatTime(plugin?.lastCheck) ?? t.never),
+            ),
         ),
-        // 更新/检查进行中：spinner + 阶段文案
+        // 检查/更新进行中：spinner + 阶段文案
         busy || checking ? h('div', { role: 'status', className: 'dshsu-progress' },
             h('span', { className: 'dshsu-spin' }),
             h('span', null, busy ? t.pluginUpdating : t.checkingLabel),
         ) : null,
         // 空闲时的结果消息
         !busy && !checking && msg !== '' ? h('div', { className: `dshsu-msg${msgClass}` }, msg) : null,
-        // 底部操作行：检查更新 + 一键全部升级
+        // 底部操作行：检查更新 + 一键升级（仅自身）
         h('div', { className: 'dshsu-actions' },
             h('button', {
                 type: 'button',
@@ -534,10 +522,10 @@ function PluginSection({ t, plugins, busy, checking, msg, onCheck, onUpgrade }) 
             ),
             h('button', {
                 type: 'button',
-                className: updateCount > 0 && !busy ? 'dshsu-btn dshsu-btn-primary' : 'dshsu-btn',
-                disabled: busy || checking || updateCount === 0,
+                className: updateAvailable && !busy ? 'dshsu-btn dshsu-btn-primary' : 'dshsu-btn',
+                disabled: busy || checking || !updateAvailable,
                 onClick: onUpgrade,
-            }, t.upgradeAll),
+            }, t.upgradeNow),
             h('span', { className: 'dshsu-spacer' }),
         ),
     );
@@ -554,9 +542,7 @@ const FALLBACK_DICT = {
         currentVersion: '当前版本', latestVersion: '最新版本',
         lastCheck: '上次检查', never: '从未', processing: '处理中…',
         updateAvailable: '可更新', upgraded: '已升级', failed: '失败',
-        pluginNav: '插件更新', upgradeAll: '一键全部升级',
-        pluginsSuffix: '个插件', updatesSuffix: '个可更新',
-        noPlugins: '未发现已安装插件', upToDate: '最新',
+        pluginNav: '插件更新',
         pluginUpdating: '插件更新进行中…', checkingLabel: '正在检查更新…',
         checkFailed: '检查更新失败',
         // 侧边导航文案：现在只有一张"版本更新"卡片。
@@ -567,9 +553,7 @@ const FALLBACK_DICT = {
         currentVersion: 'Current', latestVersion: 'Latest',
         lastCheck: 'Last check', never: 'never', processing: 'Working…',
         updateAvailable: 'Update', upgraded: 'Upgraded', failed: 'Failed',
-        pluginNav: 'Plugin Updates', upgradeAll: 'Upgrade All',
-        pluginsSuffix: ' plugins', updatesSuffix: ' to update',
-        noPlugins: 'No installed plugins found', upToDate: 'Latest',
+        pluginNav: 'Plugin Updates',
         pluginUpdating: 'Plugin update in progress…', checkingLabel: 'Checking…',
         checkFailed: 'Check failed',
         // Side navigation label: there is now only one "Updates" card.
@@ -627,19 +611,19 @@ function apply(ctx) {
         return s != null && ['running', 'downloading', 'swapping', 'restarting', 'healthcheck', 'rollback'].includes(s.state);
     }
 
-    /* ---------- 插件更新卡片的状态与动作 ---------- */
+    /* ---------- 插件更新小节的状态与动作（只针对自身） ---------- */
 
-    let pluginList = [];
+    let pluginData = null;
     let pluginBusy = false;
     let pluginMsg = '';
     let pluginChecking = false;
     let pluginRefresh = () => {};
 
-    /** 拉取插件清单（含上次检查缓存的可更新标记）。 */
+    /** 拉取 dsh-selfupdater 自身的版本信息（含上次检查缓存的可更新标记）。 */
     async function pollPlugins() {
         try {
             const data = await api('/plugins');
-            pluginList = data.plugins ?? [];
+            pluginData = data; // 响应本身就是单对象：{ currentVersion, latestVersion, ... }
             pluginBusy = data.busy === true || PLUGIN_BUSY_STATES.includes(data.state);
             if (!pluginBusy && typeof data.message === 'string' && data.message !== '') {
                 pluginMsg = data.message;
@@ -657,15 +641,14 @@ function apply(ctx) {
         setTimeout(pluginPollLoop, pluginBusy || pluginChecking ? POLL_ACTIVE_MS : PLUGIN_REFRESH_MS);
     }
 
-    /** 检查插件更新：POST /plugins/check 成功后立刻重拉清单拿结果。 */
+    /** 检查插件更新：POST /plugins/check 只查自己一个包，成功后立刻重拉结果。 */
     async function handlePluginCheck() {
         pluginChecking = true;
         pluginMsg = '';
         pluginRefresh();
         try {
-            const result = await api('/plugins/check', { method: 'POST', body: '{}' });
-            const n = result.updatedCount ?? 0;
-            pluginMsg = `检查完成：${n > 0 ? `${n} 个插件有新版本` : '所有插件均已是最新'}`;
+            await api('/plugins/check', { method: 'POST', body: '{}' });
+            // 结果文案由轮询从服务端落盘的 message 读取，这里无需自行拼装。
             await pollPlugins();
         } catch (err) {
             console.warn(`[${NS}] 插件检查更新失败:`, err);
@@ -731,9 +714,7 @@ function apply(ctx) {
                 currentVersion: dict('currentVersion'), latestVersion: dict('latestVersion'),
                 lastCheck: dict('lastCheck'), never: dict('never'), processing: dict('processing'),
                 updateAvailable: dict('updateAvailable'), upgraded: dict('upgraded'), failed: dict('failed'),
-                pluginNav: dict('pluginNav'), upgradeAll: dict('upgradeAll'),
-                upToDate: dict('upToDate'), noPlugins: dict('noPlugins'),
-                pluginsSuffix: dict('pluginsSuffix'), updatesSuffix: dict('updatesSuffix'),
+                pluginNav: dict('pluginNav'),
                 pluginUpdating: dict('pluginUpdating'), checkingLabel: dict('checkingLabel'),
             },
             status: latestStatus,
@@ -741,7 +722,7 @@ function apply(ctx) {
             checking,
             onCheck: handleCheck,
             onUpgrade: handleUpgrade,
-            plugins: pluginList,
+            plugin: pluginData,
             pluginBusy,
             pluginChecking,
             pluginMsg,

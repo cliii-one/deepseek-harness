@@ -255,29 +255,6 @@ function writePluginStatus(dshStateDir, payload) {
 }
 
 /**
- * 列出 profile 中已安装的插件及其版本。
- * 数据源是 profile/package.json 的 dependencies 字段 —— dsh plugin add
- * 安装时会把它登记进去，这是最权威的"已装清单"。
- */
-function listInstalledPlugins(workspace) {
-    const profilePkg = join(workspace, '.dsh', 'profiles', PLUGIN_PROFILE, 'package.json');
-    try {
-        const deps = JSON.parse(readFileSync(profilePkg, 'utf8')).dependencies ?? {};
-        return Object.entries(deps).map(([pkgName, range]) => ({
-            name: pkgName,
-            installedVersion: String(range).replace(/^[~^]\s*/, '') || String(range),
-        }));
-    } catch {
-        return [];
-    }
-}
-
-/** 查询 npm 上目标插件的 latest 版本号（复用带镜像回退的实现）。 */
-async function fetchPluginLatest(pkgName) {
-    return fetchLatestVersion(pkgName);
-}
-
-/**
  * 读本插件自身的已装版本：优先 import 自己的 package.json（ESM 顶层 await
  * 不适合这里，改用 createRequire 同步读取），失败时回退硬编码兜底值。
  * 用途：让"检测更新"能覆盖 dsh-selfupdater 自己 —— 此前清单来自 profile
@@ -418,36 +395,32 @@ export function apply(ctx) {
         });
 
         /* ---------- GET /dsh-selfupdater/plugins ---------- */
-        /** 插件更新是否正在进行（锁文件存在）。 */
+        /**
+         * 插件更新小节只针对本插件自身（dsh-selfupdater）：
+         * 其他插件已有各自渠道做更新检测，这里不再扫描 profile 清单。
+         * 返回数据与 DSH 小节同款三行模板：当前版本 / 最新版本 / 上次检查。
+         */
         const pluginBusy = () => existsSync(pluginLockFile);
         /** 读插件状态并合并"服务端视角"的忙闲标记。 */
-        const pluginStatusView = () => ({
-            ...readPluginStatus(dshStateDir),
-            state: pluginBusy() ? (readPluginStatus(dshStateDir).state ?? 'running') : (readPluginStatus(dshStateDir).state ?? 'idle'),
-        });
+        const pluginStatusView = () => {
+            const status = readPluginStatus(dshStateDir);
+            return { ...status, state: status.state ?? (pluginBusy() ? 'running' : 'idle') };
+        };
 
         registerRoute('GET', '/dsh-selfupdater/plugins', (_req, res) => {
-            // 清单 = 自己 + profile 已装插件（自己排最前，保证 UI 始终展示自身）。
-            const installed = [
-                { name: SELF_NAME, installedVersion: SELF_INSTALLED },
-                ...listInstalledPlugins(workspace).filter((p) => p.name !== SELF_NAME),
-            ];
             const status = pluginStatusView();
-            // 把上次检查得到的 latest 缓存合并进列表，UI 无需二次请求。
-            const cache = status.updates ?? {};
-            const items = installed.map((p) => ({
-                ...p,
-                latestVersion: cache[p.name]?.latestVersion ?? null,
-                updateAvailable: cache[p.name]?.updateAvailable === true,
-                checkedAt: cache[p.name]?.checkedAt ?? null,
-            }));
+            // 上次检查的缓存结果（latest / updateAvailable / checkedAt）存在 updates[SELF_NAME]。
+            const cache = status.updates?.[SELF_NAME] ?? {};
             sendJson(res, 200, {
-                profile: PLUGIN_PROFILE,
+                name: SELF_NAME,
+                currentVersion: SELF_INSTALLED,
+                latestVersion: cache.latestVersion ?? null,
+                updateAvailable: cache.updateAvailable === true,
+                lastCheck: cache.checkedAt ?? null,
                 busy: pluginBusy(),
                 state: status.state ?? 'idle',
                 message: status.message ?? null,
                 updatedAt: status.updatedAt ?? null,
-                plugins: items,
             });
         });
 
@@ -457,44 +430,34 @@ export function apply(ctx) {
                 sendJson(res, 403, { error: 'untrusted request' });
                 return;
             }
-            // 清单 = 自己 + profile 已装插件（与 GET /plugins 保持一致）。
-            const installed = [
-                { name: SELF_NAME, installedVersion: SELF_INSTALLED },
-                ...listInstalledPlugins(workspace).filter((p) => p.name !== SELF_NAME),
-            ];
-            // 并发查询所有插件（清单已保证至少包含自己，不可能为空）的最新版；
-            // 单个失败不拖垮整体。
-            const results = await Promise.allSettled(installed.map(async (p) => {
-                const latestVersion = await fetchPluginLatest(p.name);
-                return {
-                    name: p.name,
-                    installedVersion: p.installedVersion,
-                    latestVersion,
-                    updateAvailable: isNewer(latestVersion, p.installedVersion),
-                    checkedAt: new Date().toISOString(),
-                };
-            }));
-            const updates = {};
-            for (const r of results) {
-                if (r.status !== 'fulfilled') continue;
-                updates[r.value.name] = {
-                    latestVersion: r.value.latestVersion,
-                    updateAvailable: r.value.updateAvailable,
-                    checkedAt: r.value.checkedAt,
-                };
+            // 只查自己这一个包，成功后把结果写入状态文件缓存。
+            try {
+                const latestVersion = await fetchLatestVersion(SELF_NAME);
+                writePluginStatus(dshStateDir, {
+                    ...readPluginStatus(dshStateDir),
+                    state: 'idle',
+                    message: isNewer(latestVersion, SELF_INSTALLED)
+                        ? `发现新版本 ${latestVersion}` : '当前已是最新',
+                    updates: {
+                        [SELF_NAME]: {
+                            latestVersion,
+                            updateAvailable: isNewer(latestVersion, SELF_INSTALLED),
+                            checkedAt: new Date().toISOString(),
+                        },
+                    },
+                    updatedAt: new Date().toISOString(),
+                });
+                sendJson(res, 200, { updatedCount: isNewer(latestVersion, SELF_INSTALLED) ? 1 : 0 });
+            } catch (err) {
+                host.logger?.warn?.(`[dsh-selfupdater] 插件检查更新失败: ${err.message}`);
+                writePluginStatus(dshStateDir, {
+                    ...readPluginStatus(dshStateDir),
+                    state: 'idle',
+                    message: `插件检查更新失败：${err.message}`,
+                    updatedAt: new Date().toISOString(),
+                });
+                sendJson(res, 502, { error: `插件检查更新失败：${err.message}` });
             }
-            const failed = results.filter((r) => r.status === 'rejected').length;
-            writePluginStatus(dshStateDir, {
-                ...readPluginStatus(dshStateDir),
-                state: 'idle',
-                message: failed > 0 ? `检查完成，${failed} 个插件查询失败（网络原因可重试）` : '检查完成',
-                updates,
-                updatedAt: new Date().toISOString(),
-            });
-            sendJson(res, 200, {
-                updatedCount: Object.values(updates).filter((u) => u.updateAvailable).length,
-                failedCount: failed,
-            });
         });
 
         /* ---------- POST /dsh-selfupdater/plugins/update ---------- */
