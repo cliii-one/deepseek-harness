@@ -98,19 +98,66 @@ const THEME_DARK = {
 };
 
 /**
- * 推断宿主当前是否为暗色模式。
- * 优先级：根元素/主体的 data-theme 属性 > .dark 类 > 系统偏好。
- * 兼容 Semi/AntD/naive 等常见主题实现，探测不到一律回退媒体查询。
+ * 读取单个元素上的显式主题标记（data-theme 属性或 dark/light 类）。
+ * 返回 true=暗色、false=亮色、undefined=该元素未声明。
+ * 额外兼容 Semi Design 的 theme-dark/theme-light 类名。
+ */
+function elementThemeFlag(el) {
+    if (!el) return undefined;
+    const attr = (el.getAttribute('data-theme') ?? '').toLowerCase();
+    if (attr === 'dark' || el.classList?.contains('theme-dark')) return true;
+    if (attr === 'light' || el.classList?.contains('theme-light')) return false;
+    if (el.classList?.contains('dark')) return true;
+    if (el.classList?.contains('light')) return false;
+    return undefined;
+}
+
+/**
+ * 兜底手段：沿 DOM 向上找第一个不透明的背景色，按亮度判断明暗。
+ * 解决宿主不写任何主题标记、只换背景配色的实现（本次"深色模式下卡片
+ * 区域仍是白底黑字"正是探测不到标记导致的）。跳过插件自身节点，
+ * 避免读到自家调色板造成"鸡生蛋"死循环。
+ */
+function backgroundIsDark(startEl) {
+    let node = startEl;
+    while (node && node !== document.documentElement) {
+        // 插件自己的卡片/容器不算数，向上找宿主的真实背景。
+        if (typeof node.className === 'string' && node.className.includes(NS)) {
+            node = node.parentElement;
+            continue;
+        }
+        const bg = getComputedStyle(node).backgroundColor;
+        const m = /^rgba?\(([^)]+)\)$/i.exec(bg);
+        if (m) {
+            const [r, g, b, a = 1] = m[1].split(',').map((v) => parseFloat(v));
+            if (a > 0) {
+                // 经验加权亮度公式：< 0.45 视为深色底。
+                return (0.299 * r + 0.587 * g + 0.114 * b) / 255 < 0.45;
+            }
+        }
+        node = node.parentElement; // 透明背景继续向上
+    }
+    return false;
+}
+
+/**
+ * 推断宿主当前是否为暗色模式。判定顺序：
+ * 1. 卡片所在容器 → body → html 逐级找显式主题标记（右侧容器可能单独带 .dark）；
+ * 2. 系统偏好 prefers-color-scheme；
+ * 3. 最终兜底：读宿主实际渲染的背景色亮度。
  */
 function detectDark() {
     if (typeof document === 'undefined') return false;
-    const root = document.documentElement;
-    const attr = (root.getAttribute('data-theme')
-        ?? document.body?.getAttribute('data-theme') ?? '').toLowerCase();
-    if (attr === 'dark' || attr === 'light') return attr === 'dark';
-    if (root.classList.contains('dark') || document.body?.classList.contains('dark')) return true;
-    if (root.classList.contains('light') || document.body?.classList.contains('light')) return false;
-    return window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false;
+    // 从卡片父级开始向上扫（排除卡片本身），找不到再退回 body/html 全局标记。
+    const anchor = document.querySelector('.dshsu-card')?.parentElement ?? document.body;
+    for (let node = anchor; node; node = node.parentElement) {
+        const flag = elementThemeFlag(node);
+        if (flag !== undefined) return flag;
+    }
+    const rootFlag = elementThemeFlag(document.documentElement);
+    if (rootFlag !== undefined) return rootFlag;
+    if (window.matchMedia?.('(prefers-color-scheme: dark)').matches) return true;
+    return backgroundIsDark(anchor ?? document.body);
 }
 
 /** 已应用到根节点的主题名（防止 Observer 观察到自己写入的 style 造成死循环）。 */
@@ -137,6 +184,8 @@ const CARD_CSS = `
 .dshsu-logo{width:22px;height:22px;border-radius:50%;flex:none;display:flex;align-items:center;
   justify-content:center;background:var(--dshsu-accent-soft);color:var(--dshsu-accent);
   font-size:13px;font-weight:700}
+/* SVG 更新图标：放在圆形底上，颜色继承强调色，随主题自动换肤 */
+.dshsu-icon{flex:none;color:var(--dshsu-accent)}
 .dshsu-chip{font-size:12px;padding:2px 9px;border-radius:999px;border:1px solid var(--dshsu-border);
   color:var(--dshsu-muted);white-space:nowrap}
 .dshsu-chip-new{color:var(--dshsu-warn);background:var(--dshsu-warn-soft);border-color:transparent;font-weight:600}
@@ -184,15 +233,22 @@ function injectStyles() {
     document.head.appendChild(style);
 }
 
-/** 持续跟踪宿主主题：属性变化 + 系统偏好变化两条路都监听。 */
+/**
+ * 持续跟踪宿主主题：卡片祖先链 + body/html 属性 + 系统偏好三条路都监听。
+ * 只监听 subtree 上的 class/data-theme 变化（右侧容器单独切主题也能捕获）；
+ * 自己写入的是 style 属性，不在监听范围内，不会造成死循环。
+ */
 function watchTheme() {
     syncThemeVars();
     if (typeof document === 'undefined') return () => {};
-    const observer = new MutationObserver(syncThemeVars);
-    observer.observe(document.documentElement, {
-        attributes: true,
-        attributeFilter: ['class', 'data-theme'],
-    });
+    const observer = new MutationObserver(() => syncThemeVars());
+    for (const target of [document.documentElement, document.body]) {
+        observer.observe(target, {
+            attributes: true,
+            attributeFilter: ['class', 'data-theme'],
+            subtree: true,
+        });
+    }
     const media = window.matchMedia?.('(prefers-color-scheme: dark)');
     const onChange = () => syncThemeVars();
     media?.addEventListener?.('change', onChange);
@@ -238,6 +294,25 @@ function StepBar({ state }) {
 }
 
 /**
+ * 更新图标：SVG 循环箭头（语义 = 刷新/更新），stroke 用 currentColor
+ * 自动跟随文字颜色，亮暗主题都无需额外处理。
+ */
+function UpdateIcon() {
+    return h('svg', {
+        className: 'dshsu-icon',
+        viewBox: '0 0 24 24',
+        width: 15,
+        height: 15,
+        'aria-hidden': true,
+    },
+    // 上半圈箭头 + 下半圈箭头组成循环，Material Design "autorenew" 造型。
+    h('path', {
+        d: 'M12 5V2L8 6l4 4V7a5 5 0 1 1-5 5H5a7 7 0 1 0 7-7z',
+        fill: 'currentColor',
+    }));
+}
+
+/**
  * 主卡片：展示当前/最新版本 + 检查更新 + 一键升级。
  * 全部状态由父组件轮询 status 接口驱动；样式全部走 CSS 类，
  * 颜色由 --dshsu-* 变量提供，天然兼容亮暗两种主题。
@@ -257,7 +332,7 @@ function SelfUpdateCard({ t, status, busy, checking, onCheck, onUpgrade }) {
         // 头部：标题 + 当前版本徽章（有新版时变成琥珀"可更新"徽章）
         h('div', { className: 'dshsu-head' },
             h('div', { className: 'dshsu-title' },
-                h('span', { className: 'dshsu-logo', 'aria-hidden': true }, '⟳'),
+                h(UpdateIcon),
                 h('span', null, t.nav),
             ),
             updateAvailable
