@@ -151,7 +151,7 @@ const lockFile = join(dshStateDir, 'pluginupdate.lock');
 const stagingDir = join(dshStateDir, 'pluginupdate-staging');
 const profileDir = join(dshStateDir, 'profiles', PROFILE);
 /** 升级前的 profile 完整备份目录（失败回滚用；成功后保留一次供排查）。 */
-const bakProfileDir = join(dshStateDir, `profiles.${PROFILE}.pluginupdate-bak`);
+const bakProfileDir = profileDir + '.pluginupdate-bak';
 
 /** 国内镜像优先的 registry 候选列表（与 index.js 的策略一致）。 */
 function registryCandidates() {
@@ -369,7 +369,8 @@ async function main() {
     setState('downloading', '正在备份当前插件目录 …');
     rmSync(bakProfileDir, { recursive: true, force: true });
     renameSync(profileDir, bakProfileDir);
-    renameSync(bakProfileDir, profileDir); // 立刻放回原位：备份改用复制，避免长时间缺位
+    // 注意：不再立即还原备份！备份目录需要保留到更新成功完成，
+    // 这样如果更新失败，rollback() 函数才能从备份恢复。
     mkdirSync(stagingDir, { recursive: true });
 
     // 阶段三：逐个下载 tgz 并离线安装；任一失败立即整体回滚。
