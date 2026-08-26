@@ -249,7 +249,7 @@ function SelfUpdateCard({ t, status, busy, checking, onCheck, onUpgrade }) {
 
     // 结果消息的语义着色：成功绿 / 失败红 / 其余灰。
     const message = !busy && status?.message ? String(status.message) : '';
-    const msgClass = /最新|成功|完成/.test(message) ? ' dshsu-msg-ok'
+    const msgClass = /已是最新|发现新版本|成功|完成/.test(message) ? ' dshsu-msg-ok'
         : /失败|出错|错误/.test(message) || ['error', 'done_failed'].includes(status?.state) ? ' dshsu-msg-bad'
             : '';
 
@@ -404,6 +404,9 @@ function apply(ctx) {
             await api('/check', { method: 'POST', body: '{}' });
         } catch (err) {
             console.warn(`[${NS}] 检查更新失败:`, err);
+            // 失败信息立即显示到卡片消息区（随后轮询会用服务端落盘的同样文案覆盖），
+            // 避免"点击检测更新毫无反应"的体验。
+            latestStatus = { ...latestStatus, state: 'idle', message: `检查更新失败：${err.message}` };
         } finally {
             checking = false;
             await pollStatus();

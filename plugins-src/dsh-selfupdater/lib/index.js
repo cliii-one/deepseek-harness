@@ -10,7 +10,7 @@
  * - 升级动作通过锁文件防并发，双端校验。
  */
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -21,6 +21,8 @@ const PLUGIN_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const PKG = '@deepseek-ai/dsh';
 /** npm registry 查询超时。 */
 const FETCH_TIMEOUT_MS = 15000;
+/** 国内 npm 镜像（腾讯云），registry.npmjs.org 直连超时时的第一回退。 */
+const NPM_CHINA_MIRROR = 'https://mirrors.cloud.tencent.com/npm';
 
 /* ------------------------------------------------------------------ *
  * semver 比较（零依赖，与 updater.mjs 内实现保持一致）
@@ -142,25 +144,66 @@ function currentDshVersion(appDir) {
     }
 }
 
-/** 查询 npm registry 最新版本号；失败抛错由调用方兜底。 */
+/**
+ * 查询 npm registry 最新版本号（带镜像回退，参照 dshmarket regions.ts 的做法）：
+ * 1. 优先走环境变量 DSHSU_REGISTRY_URL 指定的镜像（部署方可自行指定国内源）；
+ * 2. 默认先试腾讯云国内镜像（飞牛OS 部署多在国内网络，直连 registry.npmjs.org
+ *    经常超时——这正是"检查更新没反应"的常见原因）；
+ * 3. 镜像失败后回退官方源，保证海外网络也能用。
+ */
 async function fetchLatestVersion(pkg) {
-    const res = await fetch(`https://registry.npmjs.org/${encodeURIComponent(pkg)}`, {
+    const errors = [];
+    for (const base of registryCandidates()) {
+        try {
+            return await fetchFromRegistry(base, pkg);
+        } catch (err) {
+            errors.push(`${base}: ${err.message}`);
+        }
+    }
+    throw new Error(errors.join('；'));
+}
+
+/** 本次要依次尝试的 registry 地址列表（去重）。 */
+function registryCandidates() {
+    const custom = process.env.DSHSU_REGISTRY_URL?.replace(/\/+$/, '');
+    const list = [custom, NPM_CHINA_MIRROR, 'https://registry.npmjs.org'];
+    return [...new Set(list.filter((v) => typeof v === 'string' && v !== ''))];
+}
+
+/** 从单个 registry 取 latest 版本号。 */
+async function fetchFromRegistry(base, pkg) {
+    const res = await fetch(`${base}/${encodeURIComponent(pkg)}`, {
         headers: { accept: 'application/json', 'user-agent': 'dsh-selfupdater' },
         signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
-    if (!res.ok) throw new Error(`registry HTTP ${res.status}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const doc = await res.json();
     const latest = doc?.['dist-tags']?.latest;
-    if (typeof latest !== 'string' || latest === '') throw new Error('registry 未返回 latest');
+    if (typeof latest !== 'string' || latest === '') throw new Error('未返回 latest');
     return latest;
 }
-
 /** 读升级状态文件（不存在时返回空对象）。 */
 function readStatus(dshStateDir) {
     try {
         return JSON.parse(readFileSync(join(dshStateDir, 'selfupdate-status.json'), 'utf8'));
     } catch {
         return {};
+    }
+}
+
+/**
+ * 持久化升级状态文件。
+ * 关键修复：首次使用时 .dsh 目录可能尚不存在（只有跑过一次升级脚本才会建它），
+ * writeFileSync 会直接抛 ENOENT，导致检查结果从未落盘 —— 这正是 UI 上
+ * "最新版本一直显示 —、上次检查一直是从未"的根因；这里先确保目录存在。
+ * 写失败仅记录日志不抛出，不能让状态落盘问题阻断接口应答。
+ */
+function writeStatus(dshStateDir, payload) {
+    try {
+        mkdirSync(dshStateDir, { recursive: true });
+        writeFileSync(join(dshStateDir, 'selfupdate-status.json'), JSON.stringify(payload, null, 2));
+    } catch (err) {
+        console.warn(`[dsh-selfupdater] 状态文件写入失败: ${err.message}`);
     }
 }
 
@@ -227,22 +270,25 @@ export function apply(ctx) {
                 const latest = await fetchLatestVersion(PKG);
                 const current = currentDshVersion(appDir);
                 const updateAvailable = isNewer(latest, current);
-                // 写回状态文件，让 UI 刷新后仍能看到上次检查结果。
-                try {
-                    writeFileSync(
-                        join(dshStateDir, 'selfupdate-status.json'),
-                        JSON.stringify({
-                            ...(await Promise.resolve(readStatus(dshStateDir))),
-                            currentVersion: current,
-                            latestVersion: latest,
-                            state: isBusy() ? 'running' : 'idle',
-                            message: updateAvailable ? `发现新版本 ${latest}` : '当前已是最新',
-                            updatedAt: new Date().toISOString(),
-                        }, null, 2),
-                    );
-                } catch { /* 状态写失败不影响应答 */ }
+                // 检查结果落盘（内部自动建目录），UI 刷新后仍能看到上次检查时间。
+                writeStatus(dshStateDir, {
+                    ...(await Promise.resolve(readStatus(dshStateDir))),
+                    currentVersion: current,
+                    latestVersion: latest,
+                    state: isBusy() ? 'running' : 'idle',
+                    message: updateAvailable ? `发现新版本 ${latest}` : '当前已是最新',
+                    updatedAt: new Date().toISOString(),
+                });
                 sendJson(res, 200, { currentVersion: current, latestVersion: latest, updateAvailable });
             } catch (err) {
+                host.logger?.warn?.(`[dsh-selfupdater] 检查更新失败: ${err.message}`);
+                // 失败信息也写入状态文件：UI 轮询能看到具体原因，不再"没反应"。
+                writeStatus(dshStateDir, {
+                    ...readStatus(dshStateDir),
+                    state: isBusy() ? 'running' : 'idle',
+                    message: `检查更新失败：${err.message}`,
+                    updatedAt: new Date().toISOString(),
+                });
                 sendJson(res, 502, { error: `检查更新失败：${err.message}` });
             }
         });
