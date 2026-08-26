@@ -266,6 +266,28 @@ async function dshPluginAdd(tgzFile) {
     return result.stdout;
 }
 
+/**
+ * 从 npm 在线重装"当前已装版本"的 dsh-selfupdater（备份丢失时的回滚兜底）。
+ * 与常规回滚不同：没有 bak 可还原时，直接重装同版本也能让服务恢复可用。
+ */
+async function dshPluginAddSelf() {
+    const pkgJson = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'));
+    const curVer = String(pkgJson?.dependencies?.['dsh-selfupdater'] ?? '').replace(/^[~^]/, '');
+    if (curVer === '') throw new Error('profile 中找不到 dsh-selfupdater 版本记录，无法重装');
+    const { tgzUrl } = await fetchPackument(
+        registryCandidates().find((b) => b !== undefined) ?? 'https://registry.npmjs.org', 'dsh-selfupdater',
+    ).catch(() => ({ tgzUrl: '' }));
+    // 拼指定版本的下载地址（fetchPackument 返回的是 latest 的地址，这里按需覆盖版本号）。
+    const url = tgzUrl !== ''
+        ? tgzUrl.replace(/-\d+\.\d+\.\d+[^/]*\.tgz$/, `-${curVer}.tgz`)
+        : `${registryCandidates()[0]}/dsh-selfupdater/-/dsh-selfupdater-${curVer}.tgz`;
+    const tgzFile = join(stagingDir, `dsh-selfupdater-${curVer}.tgz`);
+    mkdirSync(stagingDir, { recursive: true });
+    await downloadTgz(url, tgzFile);
+    await dshPluginAdd(tgzFile);
+    log(`已从 npm 重装 dsh-selfupdater@${curVer}`);
+}
+
 /* ------------------------------------------------------------------ *
  * 重启链与健康检查
  * ------------------------------------------------------------------ */
@@ -304,6 +326,22 @@ async function waitHealthy(timeoutMs) {
 /** 失败回滚：还原整个 profile 目录并再次拉起服务。 */
 async function rollback() {
     setState('rollback', '安装失败，正在回滚插件 profile …');
+    // 防御：备份目录不存在时绝不能 rename（否则就是用户遇到的 ENOENT）。
+    if (!existsSync(bakProfileDir)) {
+        log(`回滚中止：备份目录不存在 (${bakProfileDir})，尝试直接重建可用 profile`);
+        try {
+            mkdirSync(profileDir, { recursive: true });
+            await dshPluginAddSelf();
+            launchRunnerChain();
+            const ok = await waitHealthy(60000);
+            setState(ok ? 'done_failed' : 'error',
+                ok ? '已重装插件并恢复服务' : '恢复后服务仍未就绪，请查看容器日志');
+            return ok;
+        } catch (err) {
+            setState('error', `回滚失败且重装也不成功：${err.message}`);
+            return false;
+        }
+    }
     try {
         rmSync(profileDir, { recursive: true, force: true });
         renameSync(bakProfileDir, profileDir);
@@ -324,6 +362,21 @@ async function rollback() {
 
 async function main() {
     mkdirSync(dshStateDir, { recursive: true });
+
+    // 【孤儿 bak 自愈】上次更新若在"bak 已生成但还没回滚/清理"的窗口内被
+    // 中断（进程被杀、断电、看门狗超时直接 exit），会留下一个孤儿备份：
+    //   profiles/web.pluginupdate-bak  ← 真正完整的旧 profile 在这里
+    //   profiles/web                   ← 可能是空壳或半成品新版本
+    // 若不处理，下次 rollback 会因 bak 已不在而报 ENOENT。这里在动手前先救：
+    if (!existsSync(profileDir) && existsSync(bakProfileDir)) {
+        log('检测到孤儿备份（profile 缺失），自动从 bak 恢复');
+        renameSync(bakProfileDir, profileDir);
+    } else if (existsSync(bakProfileDir)) {
+        // profile 存在且不是本次会话创建的 bak：说明上一次更新已成功结束，
+        // 这个 bak 是"成功后保留供排查"的那份；本次升级即将重建备份，清掉旧的。
+        log('清理上一次更新遗留的 bak 备份目录');
+        rmSync(bakProfileDir, { recursive: true, force: true });
+    }
 
     // 锁文件双端校验：路由触发前会检查；这里再补一道防手动重复执行。
     if (existsSync(lockFile)) throw new Error('已有一次插件更新在进行中（锁文件存在）');
@@ -435,3 +488,17 @@ main().catch(async (err) => {
     }
     finish(1);
 });
+
+// 进程被外部信号杀死时（NAS 重启容器、kill 等）也要尽力把 profile 放回原位，
+// 否则留下的孤儿 bak 会让下一次回滚撞 ENOENT（本次加固的重点场景）。
+for (const sig of ['SIGTERM', 'SIGINT']) {
+    process.on(sig, () => {
+        try {
+            if (!existsSync(profileDir) && existsSync(bakProfileDir)) {
+                renameSync(bakProfileDir, profileDir);
+                log(`收到 ${sig}，已将 bak 恢复到 profile 原位`);
+            }
+        } catch { /* 尽力而为 */ }
+        finish(143);
+    });
+}
