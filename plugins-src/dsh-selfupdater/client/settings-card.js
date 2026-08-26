@@ -46,6 +46,9 @@ const POLL_ACTIVE_MS = 2000;
 const POLL_IDLE_MS = 30000;
 /** 插件清单的空闲刷新间隔（比状态轮询慢一档，避免无谓请求）。 */
 const PLUGIN_REFRESH_MS = 60000;
+/** 结果消息显示时效：同一条提示（"发现新版本/已是最新"等）超过该时长自动隐藏，
+ *  解决"切走菜单回来提示还在"的问题；重要终态另有徽章兜底。 */
+const MSG_TTL_MS = 12000;
 
 /* ------------------------------------------------------------------ *
  * 工具
@@ -62,6 +65,25 @@ async function api(path, options) {
         throw new Error(data.error ?? `HTTP ${res.status}`);
     }
     return data;
+}
+
+/** 各小节消息的"首次出现"记录（dsh / plugin 两个通道独立计时）。 */
+const msgSeen = { dsh: { text: '', at: 0 }, plugin: { text: '', at: 0 } };
+
+/**
+ * 按时效过滤消息：新文本重置计时并显示；相同文本未超时继续显示；
+ * 超过 MSG_TTL_MS 返回空串（隐藏）。切换菜单回来时轮询仍在跑，
+ * 过期消息自然不再渲染。
+ */
+function agedMessage(section, text) {
+    if (typeof text !== 'string' || text === '') return '';
+    const seen = msgSeen[section];
+    if (text !== seen.text) {
+        seen.text = text;
+        seen.at = Date.now();
+        return text;
+    }
+    return Date.now() - seen.at < MSG_TTL_MS ? text : '';
 }
 
 /* ------------------------------------------------------------------ *
@@ -536,6 +558,8 @@ function PluginSection({ t, plugin, busy, checking, msg, onCheck, onUpgrade }) {
             h('span', { className: 'dshsu-spacer' }),
             // 待重启徽章：提醒用户重启 DeepSeek Harness 后新版本才会生效
             pendingRestart ? h('span', { className: 'dshsu-pill dshsu-pill-new' }, t.pendingRestart) : null,
+            // 失败徽章：错误消息 12 秒后自动隐藏，用徽章保底提示"上次更新失败"
+            plugin?.state === 'error' ? h('span', { className: 'dshsu-pill dshsu-pill-bad' }, t.failed) : null,
         ),
     );
 }
@@ -608,14 +632,19 @@ function apply(ctx) {
     let latestStatus = null;
     let checking = false;
     let refresh = () => {};
+    /** 升级请求已发出但服务端状态尚未接管的间隙标志（点击反馈/防重复点击）。 */
+    let upgradeStarting = false;
 
     async function pollStatus() {
         try {
-            latestStatus = await api('/status');
-        } catch { /* 服务重启期间拉不到状态属正常 */ }
+            const data = await api('/status');
+            // 消息按时效过滤后再生效：过期提示不再渲染（见 agedMessage 注释）。
+            latestStatus = { ...data, message: agedMessage('dsh', data.message) };
+            upgradeStarting = false; // 服务端状态已接管视觉
+        } catch { /* 服务重启期间拉不到状态属正常：保持 starting 视觉 */ }
         refresh();
         // 升级中高频轮询，空闲低频保活。
-        setTimeout(pollStatus, isBusyState(latestStatus) ? POLL_ACTIVE_MS : POLL_IDLE_MS);
+        setTimeout(pollStatus, isBusyState(latestStatus) || upgradeStarting ? POLL_ACTIVE_MS : POLL_IDLE_MS);
     }
 
     function isBusyState(s) {
@@ -629,6 +658,8 @@ function apply(ctx) {
     let pluginMsg = '';
     let pluginChecking = false;
     let pluginRefresh = () => {};
+    /** 更新请求已发出但服务端 busy 尚未接管的间隙标志（点击反馈/防重复点击）。 */
+    let pluginStarting = false;
 
     /** 拉取 dsh-selfupdater 自身的版本信息（含上次检查缓存的可更新标记）。 */
     async function pollPlugins() {
@@ -636,8 +667,13 @@ function apply(ctx) {
             const data = await api('/plugins');
             pluginData = data; // 响应本身就是单对象：{ currentVersion, latestVersion, ... }
             pluginBusy = data.busy === true || PLUGIN_BUSY_STATES.includes(data.state);
-            if (!pluginBusy && typeof data.message === 'string' && data.message !== '') {
-                pluginMsg = data.message;
+            if (!pluginBusy) {
+                // 空闲时才显示消息，且按时效过滤：过期提示（如"发现新版本"）自动隐藏。
+                pluginMsg = agedMessage('plugin', data.message);
+            }
+            // 服务端 busy 或终态已可见：乐观标志功成身退。
+            if (pluginBusy || data.state === 'done_pending_restart' || data.state === 'error') {
+                pluginStarting = false;
             }
         } catch { /* 服务重启期间拉不到属正常 */ }
         pluginRefresh();
@@ -649,7 +685,7 @@ function apply(ctx) {
      */
     async function pluginPollLoop() {
         await pollPlugins();
-        setTimeout(pluginPollLoop, pluginBusy || pluginChecking ? POLL_ACTIVE_MS : PLUGIN_REFRESH_MS);
+        setTimeout(pluginPollLoop, pluginBusy || pluginChecking || pluginStarting ? POLL_ACTIVE_MS : PLUGIN_REFRESH_MS);
     }
 
     /** 检查插件更新：POST /plugins/check 只查自己一个包，成功后立刻重拉结果。 */
@@ -670,16 +706,25 @@ function apply(ctx) {
         }
     }
 
-    /** 一键升级自身：v0.4.6 起服务保持运行，更新完成后提示重启生效。 */
+    /** 一键升级自身：点击立即进入"进行中"视觉（不等轮询），按钮随之禁用防重复点击；
+     *  v0.4.6 起服务保持运行，更新完成后提示重启生效。 */
     async function handlePluginUpgrade() {
+        if (pluginStarting || pluginBusy) return; // 防重复点击
+        pluginStarting = true;
+        pluginMsg = '';
+        pluginRefresh();
         try {
             await api('/plugins/update', { method: 'POST', body: '{}' });
-            pluginMsg = '';
-            // 后台任务运行期间高频轮询进度，直至出现 done_pending_restart / error 终态。
-            setTimeout(pluginPollLoop, POLL_ACTIVE_MS);
+            // 202 返回时锁文件已写，立刻拉一次即可拿到服务端 busy 接管视觉。
+            await pollPlugins();
         } catch (err) {
             console.warn(`[${NS}] 触发插件更新失败:`, err);
             pluginMsg = `触发更新失败：${err.message}`;
+            pluginStarting = false;
+        } finally {
+            // 成功路径下 starting 已被 pollPlugins 清除（服务端 busy 接管）；
+            // 这里只兜底失败/未接管的情况，避免视觉卡死。
+            if (!pluginBusy) pluginStarting = false;
             pluginRefresh();
         }
     }
@@ -700,13 +745,20 @@ function apply(ctx) {
         }
     }
 
+    /** 一键升级 DSH：点击立即进入"进行中"视觉（不等轮询），按钮随之禁用防重复点击。 */
     async function handleUpgrade() {
+        if (upgradeStarting) return; // 防重复点击
+        upgradeStarting = true;
+        refresh();
         try {
             await api('/perform', { method: 'POST', body: '{}' });
-            // 服务即将退出；进入高频轮询等新进程起来后自动恢复。
-            setTimeout(pollStatus, POLL_ACTIVE_MS);
+            // 锁文件已写，立刻拉一次状态拿 running；若已赶上服务退出，
+            // 轮询失败保持 starting 视觉，由循环重试直到新进程起来接管。
+            await pollStatus();
         } catch (err) {
             console.warn(`[${NS}] 触发升级失败:`, err);
+            upgradeStarting = false;
+            refresh();
         }
     }
 
@@ -730,12 +782,12 @@ function apply(ctx) {
                 pendingRestart: dict('pendingRestart'),
             },
             status: latestStatus,
-            busy: isBusyState(latestStatus),
+            busy: isBusyState(latestStatus) || upgradeStarting,
             checking,
             onCheck: handleCheck,
             onUpgrade: handleUpgrade,
             plugin: pluginData,
-            pluginBusy,
+            pluginBusy: pluginBusy || pluginStarting,
             pluginChecking,
             pluginMsg,
             onPluginCheck: handlePluginCheck,

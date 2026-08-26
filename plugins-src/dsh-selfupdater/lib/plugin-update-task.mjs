@@ -18,7 +18,7 @@
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /** 本插件包名（更新的目标就是自己）。 */
@@ -193,16 +193,51 @@ export function installedSelfVersion(workspace) {
     return resolveInstalledVersion(profileDir);
 }
 
-/** 定位 dsh CLI 入口：打包布局优先，其次 node_modules 标准布局。 */
+/**
+ * 定位 dsh CLI 入口（原地安装新版的执行器）。
+ * 0.4.10 修复：此前硬编码 bin/dsh.js，但 dsh 包实际 bin 是 lib/bin.js
+ * （由 package.json bin 字段声明），NAS 上因此报"无法定位 dsh 命令行工具"。
+ * 三级定位，任一命中即返回：
+ * 1. 读 dsh 包 package.json 的 bin 字段（权威，适配未来布局变化）；
+ * 2. 常见候选路径（含新旧两种布局）；
+ * 3. 从 DSH 进程自身启动入口（process.argv[1]）向上推导包根再找 bin。
+ */
 function locateDshBin(appDir) {
-    const candidates = [
-        join(appDir, 'bin', 'dsh.js'),
-        join(appDir, 'node_modules', '@deepseek-ai', 'dsh', 'bin', 'dsh.js'),
-    ];
-    for (const p of candidates) {
+    const pkgRoot = join(appDir, 'node_modules', '@deepseek-ai', 'dsh');
+    // 1. bin 字段：字符串直接用；对象取 dsh 键，缺失则取第一个值。
+    const binField = readJson(join(pkgRoot, 'package.json')).bin;
+    const values = binField && typeof binField === 'object' ? Object.values(binField) : [];
+    const binRel = typeof binField === 'string' ? binField
+        : typeof binField?.dsh === 'string' ? binField.dsh
+            : typeof values[0] === 'string' ? values[0]
+                : null;
+    if (binRel !== null) {
+        const p = resolve(pkgRoot, binRel);
         if (existsSync(p)) return p;
     }
-    throw new Error('无法定位 dsh 命令行工具（bin/dsh.js）');
+    // 2. 常见候选：新布局 lib/bin.js 优先，兼容旧的 bin/dsh.js。
+    for (const p of [
+        join(pkgRoot, 'lib', 'bin.js'),
+        join(pkgRoot, 'bin', 'dsh.js'),
+        join(appDir, 'bin', 'dsh.js'),
+    ]) {
+        if (existsSync(p)) return p;
+    }
+    // 3. 从 DSH 进程自身入口向上找包根（如 node …/dsh/lib/xxx.js 启动时）。
+    if (typeof process.argv[1] === 'string') {
+        let dir = dirname(resolve(process.argv[1]));
+        for (let i = 0; i < 6; i++) {
+            if (readJson(join(dir, 'package.json')).name === '@deepseek-ai/dsh') {
+                const p = join(dir, 'lib', 'bin.js');
+                if (existsSync(p)) return p;
+                break;
+            }
+            const parent = dirname(dir);
+            if (parent === dir) break;
+            dir = parent;
+        }
+    }
+    throw new Error(`无法定位 dsh 命令行工具（bin 字段与常见路径均未命中，appDir=${appDir}）`);
 }
 
 /** 下载 tgz 到本地暂存路径（体积小，直接缓冲写入）。 */

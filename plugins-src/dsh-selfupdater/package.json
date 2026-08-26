@@ -1,6 +1,6 @@
 {
   "name": "dsh-selfupdater",
-  "version": "0.4.9",
+  "version": "0.4.10",
   "description": "Self-update plugin for DeepSeek Harness: DSH core upgrades via detached swap script; plugin self-update installs in-place without killing the host and prompts for restart. DSH 主程序与已装插件的一站式在线更新插件。",
   "license": "MIT",
   "type": "module",
