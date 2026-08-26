@@ -316,18 +316,28 @@ async function main() {
     // 锁文件双端校验：路由触发前会检查；这里再补一道防手动重复执行。
     if (existsSync(lockFile)) throw new Error('已有一次插件更新在进行中（锁文件存在）');
 
-    // 读已安装清单：profile/package.json 的 dependencies 是最权威的数据源。
+    // 读已安装清单：profile/package.json 的 dependencies 是最权威的数据源；
+    // 再补上本插件自身（dsh-selfupdater），保证"自己也能被更新"。
     let deps;
     try {
         deps = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8')).dependencies ?? {};
     } catch {
-        setState('idle', '未发现已安装插件，无需更新');
-        finish(0);
+        deps = {};
     }
+    /** 本插件自身的已装版本：直接读自己脚本身旁的 package.json，最可靠。 */
+    let selfVersion = '';
+    try {
+        selfVersion = JSON.parse(
+            readFileSync(new URL('./../package.json', import.meta.url), 'utf8'),
+        ).version ?? '';
+    } catch { /* 读不到则跳过自更 */ }
     const installed = Object.entries(deps).map(([name, range]) => ({
         name,
         version: String(range).replace(/^[~^]\s*/, ''),
-    })).filter((p) => p.version !== '');
+    })).filter((p) => p.version !== '' && p.name !== 'dsh-selfupdater');
+    if (selfVersion !== '') {
+        installed.unshift({ name: 'dsh-selfupdater', version: selfVersion });
+    }
 
     if (installed.length === 0) {
         setState('idle', '未发现已安装插件，无需更新');

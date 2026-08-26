@@ -10,6 +10,7 @@
  * - 升级动作通过锁文件防并发，双端校验。
  */
 import { spawn } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -255,6 +256,21 @@ async function fetchPluginLatest(pkgName) {
     return fetchLatestVersion(pkgName);
 }
 
+/**
+ * 读本插件自身的已装版本：优先 import 自己的 package.json（ESM 顶层 await
+ * 不适合这里，改用 createRequire 同步读取），失败时回退硬编码兜底值。
+ * 用途：让"检测更新"能覆盖 dsh-selfupdater 自己 —— 此前清单来自 profile
+ * 的 dependencies，但"检测自己"语义上不依赖那份清单。
+ */
+function readOwnVersion() {
+    try {
+        const require = createRequire(import.meta.url);
+        return require('../package.json').version;
+    } catch {
+        return '0.0.0';
+    }
+}
+
 /* ------------------------------------------------------------------ *
  * apply 入口
  * ------------------------------------------------------------------ */
@@ -272,6 +288,9 @@ export function apply(ctx) {
         const lockFile = join(dshStateDir, 'selfupdate.lock');
         const pluginLockFile = join(dshStateDir, 'pluginupdate.lock');
         const port = servicePort();
+        /** 本插件的包名与已装版本（用于"检测自己"的更新能力）。 */
+        const SELF_NAME = name;
+        const SELF_INSTALLED = readOwnVersion();
 
         /** 升级是否正在进行（锁文件存在）。 */
         const isBusy = () => existsSync(lockFile);
@@ -387,7 +406,11 @@ export function apply(ctx) {
         });
 
         registerRoute('GET', '/dsh-selfupdater/plugins', (_req, res) => {
-            const installed = listInstalledPlugins(workspace);
+            // 清单 = 自己 + profile 已装插件（自己排最前，保证 UI 始终展示自身）。
+            const installed = [
+                { name: SELF_NAME, installedVersion: SELF_INSTALLED },
+                ...listInstalledPlugins(workspace).filter((p) => p.name !== SELF_NAME),
+            ];
             const status = pluginStatusView();
             // 把上次检查得到的 latest 缓存合并进列表，UI 无需二次请求。
             const cache = status.updates ?? {};
@@ -413,7 +436,11 @@ export function apply(ctx) {
                 sendJson(res, 403, { error: 'untrusted request' });
                 return;
             }
-            const installed = listInstalledPlugins(workspace);
+            // 清单 = 自己 + profile 已装插件（与 GET /plugins 保持一致）。
+            const installed = [
+                { name: SELF_NAME, installedVersion: SELF_INSTALLED },
+                ...listInstalledPlugins(workspace).filter((p) => p.name !== SELF_NAME),
+            ];
             if (installed.length === 0) {
                 sendJson(res, 200, { plugins: [], note: '未发现已安装插件' });
                 return;
