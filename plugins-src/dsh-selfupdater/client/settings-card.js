@@ -1,5 +1,5 @@
 /**
- * dsh-selfupdater 浏览器端入口：在设置页注入"版本更新"卡片。
+ * dsh-selfupdater 浏览器端入口：在设置页注入"DSH版本更新"和"插件更新"两张卡片。
  *
  * 【加载协议 - 重要】DSH 的 ModuleLoader 动态 import 本 bundle 后，
  * 会核对注册表中是否存在本插件的注册记录；bundle 必须在模块执行期间
@@ -19,7 +19,7 @@
  * - 通过 MutationObserver 监听宿主根节点的 class/data-theme 变化，
  *   结合 prefers-color-scheme 媒体查询推断当前是亮色还是暗色，
  *   把对应调色板写到根节点的 --dshsu-* 变量上；
- * - 两张卡片（主设置区 + 插件区）自动跟随，无需各自感知主题。
+ * - 所有卡片（DSH 版本更新 + 插件更新）自动跟随主题，无需各自感知明暗。
  */
 window.__ModuleLoader__.load({
     id: 'dsh-selfupdater',
@@ -43,6 +43,8 @@ const API_BASE = '/dsh-selfupdater';
 /** 状态轮询间隔（升级进行中 2 秒，空闲 30 秒）。 */
 const POLL_ACTIVE_MS = 2000;
 const POLL_IDLE_MS = 30000;
+/** 插件清单的空闲刷新间隔（比状态轮询慢一档，避免无谓请求）。 */
+const PLUGIN_REFRESH_MS = 60000;
 
 /* ------------------------------------------------------------------ *
  * 工具
@@ -221,6 +223,14 @@ const CARD_CSS = `
 .dshsu-pill{font-size:12px;padding:2px 9px;border-radius:999px;white-space:nowrap}
 .dshsu-pill-ok{color:var(--dshsu-success);background:var(--dshsu-success-soft)}
 .dshsu-pill-bad{color:var(--dshsu-danger);background:var(--dshsu-danger-soft)}
+/* ---- 插件更新卡片专用 ---- */
+.dshsu-plist{display:grid;gap:8px;background:var(--dshsu-subtle);border-radius:8px;padding:10px 12px}
+.dshsu-prow{display:flex;align-items:center;gap:10px;font-size:13px;min-width:0}
+.dshsu-pmain{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1}
+.dshsu-pname{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dshsu-pver{color:var(--dshsu-muted);font-size:12px;font-variant-numeric:tabular-nums}
+.dshsu-empty{font-size:13px;color:var(--dshsu-muted)}
+.dshsu-pill-new{color:var(--dshsu-warn);background:var(--dshsu-warn-soft)}
 `;
 
 /** 幂等注入 <style>；重复调用只保留第一份。 */
@@ -403,22 +413,120 @@ function formatTime(iso) {
 }
 
 /* ------------------------------------------------------------------ *
+ * 插件更新卡片：列出已装插件 + 检查更新 + 一键全部升级
+ * ------------------------------------------------------------------ */
+
+/** 插件更新进行中的状态集合（与后端锁文件/state 约定一致）。 */
+const PLUGIN_BUSY_STATES = ['running', 'downloading', 'restarting', 'healthcheck', 'rollback'];
+
+/**
+ * 插件列表行：包名 + 当前→最新版本 + 可更新徽章。
+ * @param p - 单个插件条目 { name, installedVersion, latestVersion, updateAvailable }
+ * @param t - 文案对象
+ */
+function PluginRow({ p, t }) {
+    return h('div', { className: 'dshsu-prow' },
+        h('div', { className: 'dshsu-pmain' },
+            h('span', {
+                className: 'dshsu-pname',
+                title: p.name,
+            }, p.name),
+            // 版本行：有新版时显示"当前 → 最新"，一眼看出升级去向。
+            h('span', { className: 'dshsu-pver' },
+                p.updateAvailable && p.latestVersion != null
+                    ? `${p.installedVersion ?? '?'} → ${p.latestVersion}`
+                    : (p.installedVersion ?? '?'),
+            ),
+        ),
+        p.updateAvailable
+            ? h('span', { className: 'dshsu-pill dshsu-pill-new' }, t.updateAvailable)
+            : (p.latestVersion != null ? h('span', { className: 'dshsu-pill dshsu-pill-ok' }, t.upToDate) : null),
+    );
+}
+
+/**
+ * 插件更新卡片。
+ * @param props - plugins 插件数组；busy 是否有插件更新在跑；
+ *               checking 是否正在检查；msg 结果消息；各事件回调
+ */
+function PluginUpdateCard({ t, plugins, busy, checking, msg, onCheck, onUpgrade }) {
+    const updateCount = plugins.filter((p) => p.updateAvailable).length;
+    // 结果消息的语义着色：成功绿 / 失败红 / 其余灰。
+    const msgClass = /已是最新|完成|成功/.test(msg) ? ' dshsu-msg-ok'
+        : /失败|出错|错误|超时/.test(msg) ? ' dshsu-msg-bad'
+            : '';
+
+    return h('div', { className: 'dshsu-card' },
+        // 头部：标题 + 可更新数量徽章（无可更新时显示插件总数）
+        h('div', { className: 'dshsu-head' },
+            h('div', { className: 'dshsu-title' },
+                h(UpdateIcon),
+                h('span', null, t.pluginNav),
+            ),
+            updateCount > 0
+                ? h('span', { className: 'dshsu-chip dshsu-chip-new' }, `${updateCount} ${t.updatesSuffix}`)
+                : h('span', { className: 'dshsu-chip' }, `${plugins.length} ${t.pluginsSuffix}`),
+        ),
+        // 插件清单（空态给提示）
+        plugins.length > 0
+            ? h('div', { className: 'dshsu-plist' }, plugins.map((p) => h(PluginRow, { key: p.name, p, t })))
+            : h('div', { className: 'dshsu-plist' }, h('div', { className: 'dshsu-empty' }, t.noPlugins)),
+        // 更新/检查进行中：spinner + 阶段文案
+        busy || checking ? h('div', { role: 'status', className: 'dshsu-progress' },
+            h('span', { className: 'dshsu-spin' }),
+            h('span', null, busy ? t.pluginUpdating : t.checkingLabel),
+        ) : null,
+        // 空闲时的结果消息
+        !busy && !checking && msg !== '' ? h('div', { className: `dshsu-msg${msgClass}` }, msg) : null,
+        // 底部操作行：检查更新 + 一键全部升级
+        h('div', { className: 'dshsu-actions' },
+            h('button', {
+                type: 'button',
+                className: 'dshsu-btn',
+                disabled: busy || checking,
+                onClick: onCheck,
+            },
+                checking ? h('span', { className: 'dshsu-spin' }) : null,
+                t.checkUpdate,
+            ),
+            h('button', {
+                type: 'button',
+                className: updateCount > 0 && !busy ? 'dshsu-btn dshsu-btn-primary' : 'dshsu-btn',
+                disabled: busy || checking || updateCount === 0,
+                onClick: onUpgrade,
+            }, t.upgradeAll),
+            h('span', { className: 'dshsu-spacer' }),
+        ),
+    );
+}
+
+/* ------------------------------------------------------------------ *
  * 宿主挂载
  * ------------------------------------------------------------------ */
 
 /** 内置双语字典（宿主 locale 服务缺失时的兜底）。 */
 const FALLBACK_DICT = {
     zh: {
-        nav: '版本更新', checkUpdate: '检查更新', upgradeNow: '一键升级',
+        nav: 'DSH版本更新', checkUpdate: '检查更新', upgradeNow: '一键升级',
         currentVersion: '当前版本', latestVersion: '最新版本',
         lastCheck: '上次检查', never: '从未', processing: '处理中…',
         updateAvailable: '可更新', upgraded: '已升级', failed: '失败',
+        pluginNav: '插件更新', upgradeAll: '一键全部升级',
+        pluginsSuffix: '个插件', updatesSuffix: '个可更新',
+        noPlugins: '未发现已安装插件', upToDate: '最新',
+        pluginUpdating: '插件更新进行中…', checkingLabel: '正在检查更新…',
+        checkFailed: '检查更新失败',
     },
     en: {
-        nav: 'Software Update', checkUpdate: 'Check for updates', upgradeNow: 'Upgrade now',
+        nav: 'DSH Update', checkUpdate: 'Check for updates', upgradeNow: 'Upgrade now',
         currentVersion: 'Current', latestVersion: 'Latest',
         lastCheck: 'Last check', never: 'never', processing: 'Working…',
         updateAvailable: 'Update', upgraded: 'Upgraded', failed: 'Failed',
+        pluginNav: 'Plugin Updates', upgradeAll: 'Upgrade All',
+        pluginsSuffix: ' plugins', updatesSuffix: ' to update',
+        noPlugins: 'No installed plugins found', upToDate: 'Latest',
+        pluginUpdating: 'Plugin update in progress…', checkingLabel: 'Checking…',
+        checkFailed: 'Check failed',
     },
 };
 
@@ -472,6 +580,69 @@ function apply(ctx) {
         return s != null && ['running', 'downloading', 'swapping', 'restarting', 'healthcheck', 'rollback'].includes(s.state);
     }
 
+    /* ---------- 插件更新卡片的状态与动作 ---------- */
+
+    let pluginList = [];
+    let pluginBusy = false;
+    let pluginMsg = '';
+    let pluginChecking = false;
+    let pluginRefresh = () => {};
+
+    /** 拉取插件清单（含上次检查缓存的可更新标记）。 */
+    async function pollPlugins() {
+        try {
+            const data = await api('/plugins');
+            pluginList = data.plugins ?? [];
+            pluginBusy = data.busy === true || PLUGIN_BUSY_STATES.includes(data.state);
+            if (!pluginBusy && typeof data.message === 'string' && data.message !== '') {
+                pluginMsg = data.message;
+            }
+        } catch { /* 服务重启期间拉不到属正常 */ }
+        pluginRefresh();
+    }
+
+    /**
+     * 插件更新的轮询循环：独立于 DSH 主程序的状态轮询。
+     * 更新进行中走 2 秒高频；空闲时降为低频保活。
+     */
+    async function pluginPollLoop() {
+        await pollPlugins();
+        setTimeout(pluginPollLoop, pluginBusy || pluginChecking ? POLL_ACTIVE_MS : PLUGIN_REFRESH_MS);
+    }
+
+    /** 检查插件更新：POST /plugins/check 成功后立刻重拉清单拿结果。 */
+    async function handlePluginCheck() {
+        pluginChecking = true;
+        pluginMsg = '';
+        pluginRefresh();
+        try {
+            const result = await api('/plugins/check', { method: 'POST', body: '{}' });
+            const n = result.updatedCount ?? 0;
+            pluginMsg = `检查完成：${n > 0 ? `${n} 个插件有新版本` : '所有插件均已是最新'}`;
+            await pollPlugins();
+        } catch (err) {
+            console.warn(`[${NS}] 插件检查更新失败:`, err);
+            pluginMsg = `${dict('checkFailed')}：${err.message}`;
+        } finally {
+            pluginChecking = false;
+            pluginRefresh();
+        }
+    }
+
+    /** 一键升级全部插件：受理成功后进入 2 秒高频轮询等结果。 */
+    async function handlePluginUpgrade() {
+        try {
+            await api('/plugins/update', { method: 'POST', body: '{}' });
+            pluginMsg = '';
+            // 服务即将退出；进入高频轮询等新进程起来后自动恢复进度展示。
+            setTimeout(pluginPollLoop, POLL_ACTIVE_MS);
+        } catch (err) {
+            console.warn(`[${NS}] 触发插件更新失败:`, err);
+            pluginMsg = `触发更新失败：${err.message}`;
+            pluginRefresh();
+        }
+    }
+
     async function handleCheck() {
         checking = true;
         refresh();
@@ -498,7 +669,7 @@ function apply(ctx) {
         }
     }
 
-    /** 渲染当前卡片。useState 仅用来拿到强制刷新的开关。 */
+    /** DSH 版本更新卡片。useState 仅用来拿到强制刷新的开关。 */
     function Card() {
         const [, tick] = useState(0);
         refresh = () => tick((n) => n + 1);
@@ -517,7 +688,28 @@ function apply(ctx) {
         });
     }
 
-    // 注册主设置区（与 dshmarket 同款插槽）。
+    /** 插件更新卡片（同样以 useState 拿强制刷新开关）。 */
+    function PluginCard() {
+        const [, tick] = useState(0);
+        pluginRefresh = () => tick((n) => n + 1);
+        return h(PluginUpdateCard, {
+            t: {
+                pluginNav: dict('pluginNav'), checkUpdate: dict('checkUpdate'),
+                upgradeAll: dict('upgradeAll'), updateAvailable: dict('updateAvailable'),
+                upToDate: dict('upToDate'), noPlugins: dict('noPlugins'),
+                pluginsSuffix: dict('pluginsSuffix'), updatesSuffix: dict('updatesSuffix'),
+                pluginUpdating: dict('pluginUpdating'), checkingLabel: dict('checkingLabel'),
+            },
+            plugins: pluginList,
+            busy: pluginBusy,
+            checking: pluginChecking,
+            msg: pluginMsg,
+            onCheck: handlePluginCheck,
+            onUpgrade: handlePluginUpgrade,
+        });
+    }
+
+    // 注册主设置区（与 dshmarket 同款插槽）：第一张 = DSH 版本更新。
     slots.inject('settings.section', () => slots.register({
         name: 'settings.section',
         id: NS,
@@ -525,6 +717,15 @@ function apply(ctx) {
         label: () => dict('nav'),
         locale: NS,
     }, Card));
+
+    // 第二张 = 插件更新（order 错开避免排序抖动；id 不同保证注册表唯一）。
+    slots.inject('settings.section', () => slots.register({
+        name: 'settings.section',
+        id: `${NS}.plugin`,
+        order: 46,
+        label: () => dict('pluginNav'),
+        locale: NS,
+    }, PluginCard));
 
     // 若宿主提供 settingsScope（rc.7+），再往"插件"区补一张卡片。
     try {
@@ -537,8 +738,9 @@ function apply(ctx) {
         });
     } catch { /* settingsScope 缺失不影响主设置区 */ }
 
-    // 启动首轮轮询。
+    // 启动两条独立的轮询循环（DSH 状态 + 插件清单）。
     void pollStatus();
+    void pluginPollLoop();
 }
 
     // 按 dshmarket 编译产物的收尾格式：把三件套逐个挂到 exports 并返回命名空间对象。

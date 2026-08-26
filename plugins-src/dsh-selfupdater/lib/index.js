@@ -11,7 +11,7 @@
  */
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const name = 'dsh-selfupdater';
@@ -23,6 +23,8 @@ const PKG = '@deepseek-ai/dsh';
 const FETCH_TIMEOUT_MS = 15000;
 /** 国内 npm 镜像（腾讯云），registry.npmjs.org 直连超时时的第一回退。 */
 const NPM_CHINA_MIRROR = 'https://mirrors.cloud.tencent.com/npm';
+/** 插件所在的 profile 名（与 runner.js 的 DSH_PLUGIN_PROFILE 约定一致）。 */
+const PLUGIN_PROFILE = process.env.DSH_PLUGIN_PROFILE ?? 'web';
 
 /* ------------------------------------------------------------------ *
  * semver 比较（零依赖，与 updater.mjs 内实现保持一致）
@@ -208,6 +210,52 @@ function writeStatus(dshStateDir, payload) {
 }
 
 /* ------------------------------------------------------------------ *
+ * 插件更新（与主程序升级共用同一入口，但走独立的状态/锁/升级脚本）
+ * ------------------------------------------------------------------ */
+
+/** 读插件状态文件（不存在时返回空对象）。 */
+function readPluginStatus(dshStateDir) {
+    try {
+        return JSON.parse(readFileSync(join(dshStateDir, 'pluginupdate-status.json'), 'utf8'));
+    } catch {
+        return {};
+    }
+}
+
+/** 持久化插件状态文件（自动建目录；失败仅告警不阻断应答）。 */
+function writePluginStatus(dshStateDir, payload) {
+    try {
+        mkdirSync(dshStateDir, { recursive: true });
+        writeFileSync(join(dshStateDir, 'pluginupdate-status.json'), JSON.stringify(payload, null, 2));
+    } catch (err) {
+        console.warn(`[dsh-selfupdater] 插件状态文件写入失败: ${err.message}`);
+    }
+}
+
+/**
+ * 列出 profile 中已安装的插件及其版本。
+ * 数据源是 profile/package.json 的 dependencies 字段 —— dsh plugin add
+ * 安装时会把它登记进去，这是最权威的"已装清单"。
+ */
+function listInstalledPlugins(workspace) {
+    const profilePkg = join(workspace, '.dsh', 'profiles', PLUGIN_PROFILE, 'package.json');
+    try {
+        const deps = JSON.parse(readFileSync(profilePkg, 'utf8')).dependencies ?? {};
+        return Object.entries(deps).map(([pkgName, range]) => ({
+            name: pkgName,
+            installedVersion: String(range).replace(/^[~^]\s*/, '') || String(range),
+        }));
+    } catch {
+        return [];
+    }
+}
+
+/** 查询 npm 上目标插件的 latest 版本号（复用带镜像回退的实现）。 */
+async function fetchPluginLatest(pkgName) {
+    return fetchLatestVersion(pkgName);
+}
+
+/* ------------------------------------------------------------------ *
  * apply 入口
  * ------------------------------------------------------------------ */
 
@@ -222,6 +270,7 @@ export function apply(ctx) {
         const workspace = resolveWorkspace(appDir);
         const dshStateDir = join(workspace, '.dsh');
         const lockFile = join(dshStateDir, 'selfupdate.lock');
+        const pluginLockFile = join(dshStateDir, 'pluginupdate.lock');
         const port = servicePort();
 
         /** 升级是否正在进行（锁文件存在）。 */
@@ -326,6 +375,118 @@ export function apply(ctx) {
             setTimeout(() => process.exit(0), 800);
             // 先应答，让前端拿到"已受理"再等断线。
             sendJson(res, 202, { accepted: true, note: '服务将自动退出并由升级脚本接管' });
+        });
+
+        /* ---------- GET /dsh-selfupdater/plugins ---------- */
+        /** 插件更新是否正在进行（锁文件存在）。 */
+        const pluginBusy = () => existsSync(pluginLockFile);
+        /** 读插件状态并合并"服务端视角"的忙闲标记。 */
+        const pluginStatusView = () => ({
+            ...readPluginStatus(dshStateDir),
+            state: pluginBusy() ? (readPluginStatus(dshStateDir).state ?? 'running') : (readPluginStatus(dshStateDir).state ?? 'idle'),
+        });
+
+        registerRoute('GET', '/dsh-selfupdater/plugins', (_req, res) => {
+            const installed = listInstalledPlugins(workspace);
+            const status = pluginStatusView();
+            // 把上次检查得到的 latest 缓存合并进列表，UI 无需二次请求。
+            const cache = status.updates ?? {};
+            const items = installed.map((p) => ({
+                ...p,
+                latestVersion: cache[p.name]?.latestVersion ?? null,
+                updateAvailable: cache[p.name]?.updateAvailable === true,
+                checkedAt: cache[p.name]?.checkedAt ?? null,
+            }));
+            sendJson(res, 200, {
+                profile: PLUGIN_PROFILE,
+                busy: pluginBusy(),
+                state: status.state ?? 'idle',
+                message: status.message ?? null,
+                updatedAt: status.updatedAt ?? null,
+                plugins: items,
+            });
+        });
+
+        /* ---------- POST /dsh-selfupdater/plugins/check ---------- */
+        registerRoute('POST', '/dsh-selfupdater/plugins/check', async (req, res) => {
+            if (!sameOrigin(req)) {
+                sendJson(res, 403, { error: 'untrusted request' });
+                return;
+            }
+            const installed = listInstalledPlugins(workspace);
+            if (installed.length === 0) {
+                sendJson(res, 200, { plugins: [], note: '未发现已安装插件' });
+                return;
+            }
+            // 并发查询所有插件的 npm 最新版；单个失败不拖垮整体。
+            const results = await Promise.allSettled(installed.map(async (p) => {
+                const latestVersion = await fetchPluginLatest(p.name);
+                return {
+                    name: p.name,
+                    installedVersion: p.installedVersion,
+                    latestVersion,
+                    updateAvailable: isNewer(latestVersion, p.installedVersion),
+                    checkedAt: new Date().toISOString(),
+                };
+            }));
+            const updates = {};
+            for (const r of results) {
+                if (r.status !== 'fulfilled') continue;
+                updates[r.value.name] = {
+                    latestVersion: r.value.latestVersion,
+                    updateAvailable: r.value.updateAvailable,
+                    checkedAt: r.value.checkedAt,
+                };
+            }
+            const failed = results.filter((r) => r.status === 'rejected').length;
+            writePluginStatus(dshStateDir, {
+                ...readPluginStatus(dshStateDir),
+                state: 'idle',
+                message: failed > 0 ? `检查完成，${failed} 个插件查询失败（网络原因可重试）` : '检查完成',
+                updates,
+                updatedAt: new Date().toISOString(),
+            });
+            sendJson(res, 200, {
+                updatedCount: Object.values(updates).filter((u) => u.updateAvailable).length,
+                failedCount: failed,
+            });
+        });
+
+        /* ---------- POST /dsh-selfupdater/plugins/update ---------- */
+        registerRoute('POST', '/dsh-selfupdater/plugins/update', (req, res) => {
+            if (!sameOrigin(req)) {
+                sendJson(res, 403, { error: 'untrusted request' });
+                return;
+            }
+            if (pluginBusy()) {
+                sendJson(res, 409, { error: '已有一次插件更新在进行中' });
+                return;
+            }
+            try {
+                writePluginStatus(dshStateDir, {
+                    ...readPluginStatus(dshStateDir),
+                    state: 'running',
+                    message: '插件更新已受理，正在启动升级脚本…',
+                    startedAt: new Date().toISOString(),
+                });
+                writeFileSync(pluginLockFile, JSON.stringify({ pid: process.pid, startedAt: Date.now(), by: 'plugin-update' }));
+            } catch (err) {
+                sendJson(res, 500, { error: `写入锁文件失败：${err.message}` });
+                return;
+            }
+            const child = spawn(process.execPath, [
+                join(PLUGIN_ROOT, 'lib', 'plugin-updater.mjs'),
+                '--pid', String(process.pid),
+                '--app-dir', appDir,
+                '--workspace', workspace,
+                '--port', String(port),
+            ], { detached: true, stdio: 'ignore', env: process.env });
+            child.unref();
+
+            host.logger?.info?.(`[dsh-selfupdater] 插件更新进程已启动 pid=${child.pid}，DSH 即将退出`);
+            // 与主程序升级一致：给 spawn 落稳时间后主动退出，让脚本接管重启链。
+            setTimeout(() => process.exit(0), 800);
+            sendJson(res, 202, { accepted: true, note: '插件更新将由分离脚本执行并自动重启服务' });
         });
 
         host.logger?.info?.('[dsh-selfupdater] 路由已挂载');
