@@ -296,10 +296,34 @@ export function apply(ctx) {
          * 返回数据与 DSH 小节同款三行模板：当前版本 / 最新版本 / 上次检查。
          */
         const pluginBusy = () => existsSync(pluginLockFile);
-        /** 读插件状态并合并"服务端视角"的忙闲标记。 */
+        /**
+         * 读插件状态并合并"服务端视角"的忙闲标记。
+         *
+         * 【为何要归位 done_pending_restart】更新成功后 setState 把
+         * done_pending_restart 写进磁盘，但"是否已经重启"只有通过比较
+         * 真实落盘版本才能判定：重启后 resolveInstalledVersion 读到的新版本
+         * 已经等于 targetVersion（更新已生效），此时再把"请重启生效"的徽章
+         * 继续挂在界面上就是误导（用户实测"重启后还一直显示请重启"）。
+         * 这里在读取时归一化：若状态是 done_pending_restart 且当前真实
+         * 运行版本已 >= targetVersion，说明更新已生效，把 state 归位为 idle，
+         * 并顺手覆写磁盘，避免每次读都重复判定。
+         */
         const pluginStatusView = () => {
             const status = readPluginStatus(dshStateDir);
-            return { ...status, state: status.state ?? (pluginBusy() ? 'running' : 'idle') };
+            const state = status.state ?? (pluginBusy() ? 'running' : 'idle');
+            // 仅处理"待重启"终态：targetVersion 存在才可能有归位判定。
+            if (state === 'done_pending_restart' && typeof status.targetVersion === 'string' && status.targetVersion !== '') {
+                const installedNow = selfInstalled();
+                // 重启后真实版本已到目标版本 => 更新已生效，徽章不再有意义。
+                // 用 isNewer(target, installed) 判"目标是否还新于已装"：返回 false
+                // 即目标不再领先，说明已装版本已追平/超过目标（更新已生效）。
+                if (installedNow !== null && isNewer(status.targetVersion, installedNow) === false) {
+                    const settled = { ...status, state: 'idle', message: null };
+                    writePluginStatus(dshStateDir, settled);
+                    return settled;
+                }
+            }
+            return { ...status, state };
         };
 
         registerRoute('GET', '/dsh-selfupdater/plugins', (_req, res) => {
