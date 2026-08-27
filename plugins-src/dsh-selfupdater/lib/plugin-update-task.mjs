@@ -104,17 +104,31 @@ async function fetchVersionDoc(base, pkg) {
     return { version: doc.version, tarball: doc?.dist?.tarball ?? null };
 }
 
-/** 依次尝试各 registry，返回首个成功的 { version, tarball }。 */
+/**
+ * 查询最新版本与下载地址（检查更新与更新任务共用，保证两边结论一致）。
+ *
+ * 0.4.14 修复：旧实现"第一个成功的 registry 就采用"。腾讯镜像 /latest 端点
+ * CDN 缓存陈旧时仍返回旧版本文档，导致"检查更新拿到 npmjs 的新版本、
+ * 点更新后任务却被镜像的旧版本骗过"而误判"无需更新"（NAS 0.4.12→0.4.13
+ * 实测踩坑）。改为并行查询全部 registry、取 semver 最大的结果：
+ * 任何一个镜像拿到新版即生效，单镜像陈旧缓存不再能压制判定。
+ *
+ * @returns {{version: string, tarball: string|null}} 全部失败时抛聚合错误。
+ */
 async function fetchLatestRelease(pkg) {
+    const candidates = registryCandidates();
+    const results = await Promise.allSettled(candidates.map((base) => fetchVersionDoc(base, pkg)));
+    let best = null;
     const errors = [];
-    for (const base of registryCandidates()) {
-        try {
-            return await fetchVersionDoc(base, pkg);
-        } catch (err) {
-            errors.push(`${base}: ${err.message}`);
+    results.forEach((r, i) => {
+        if (r.status === 'fulfilled') {
+            if (best === null || isNewer(r.value.version, best.version)) best = r.value;
+        } else {
+            errors.push(`${candidates[i]}: ${r.reason.message}`);
         }
-    }
-    throw new Error(errors.join('；'));
+    });
+    if (best === null) throw new Error(errors.join('；'));
+    return best;
 }
 
 /** 只取最新版本号（检查更新路由使用）。 */
@@ -375,7 +389,10 @@ export async function runPluginUpdateTask({ appDir, workspace, logger }) {
         const release = await fetchLatestRelease(SELF_NAME);
         if (!isNewer(release.version, installed)) {
             log(`已是最新版本 ${installed}，无需更新`);
-            setState('done_pending_restart', `当前已是最新（${installed}），无需更新`);
+            // 状态必须是 idle：无需更新不是"待重启"，若错用 done_pending_restart
+            // 前端会同时渲染"已是最新"消息与"重启生效"徽章，自相矛盾
+            //（NAS 0.4.12→0.4.13 实测踩坑）。消息照常显示，12 秒后自动隐藏。
+            setState('idle', `当前已是最新（${installed}），无需更新`);
             return;
         }
 
