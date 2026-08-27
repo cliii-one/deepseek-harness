@@ -17,7 +17,7 @@
  */
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -191,6 +191,44 @@ function resolveInstalledVersion(profileDir) {
 export function installedSelfVersion(workspace) {
     const profileDir = join(workspace, '.dsh', 'profiles', process.env.DSH_PLUGIN_PROFILE ?? 'web');
     return resolveInstalledVersion(profileDir);
+}
+
+/**
+ * 同步 FPK 内置插件种子目录（APP_DIR/plugins/），防止重启回退。0.4.12 新增。
+ *
+ * 【为什么要同步种子】runner.js 每次启动都会执行 installBundledPlugins()：
+ * 读 bundled.txt 清单，发现"种子 tgz 版本 ≠ profile 已装版本"就用种子重装。
+ * 在线更新装上新版后（如 0.4.11），种子还是 FPK 打包时的旧版（如 0.4.10），
+ * 重启即被覆盖回旧版 —— 这正是"更新成功但重启后版本回退"的根因。
+ *
+ * 同步内容：新版 tgz 写入种子目录 + bundled.txt 清单行替换 + 删除旧版 tgz。
+ * 同步后 runner 下次启动看到"已装版本 == 种子版本"即跳过重装，更新得以存活。
+ *
+ * @returns {string|null} 失败原因；成功返回 null。
+ */
+function syncBundledSeed(appDir, stagingTgz, newVersion) {
+    try {
+        const seedDir = join(appDir, 'plugins');
+        const stagedName = `${SELF_NAME}-${newVersion}.tgz`;
+        const listFile = join(seedDir, 'bundled.txt');
+        // 无种子目录说明不是 FPK 部署（本地开发等），无需同步。
+        if (!existsSync(listFile)) return null;
+        // 1. 新版 tgz 就位。
+        copyFileSync(stagingTgz, join(seedDir, stagedName));
+        // 2. bundled.txt 里本插件的行替换为新文件名（其他插件行不动）。
+        const lines = readFileSync(listFile, 'utf8').split('\n')
+            .map((line) => /^dsh-selfupdater-[\w.-]+\.tgz$/.test(line.trim()) ? stagedName : line);
+        writeFileSync(listFile, lines.join('\n'));
+        // 3. 清掉旧版种子 tgz（文件名带版本号，不删则堆积）。
+        for (const f of readdirSync(seedDir)) {
+            if (f !== stagedName && /^dsh-selfupdater-[\w.-]+\.tgz$/.test(f)) {
+                rmSync(join(seedDir, f), { force: true });
+            }
+        }
+        return null;
+    } catch (err) {
+        return err.message;
+    }
 }
 
 /**
@@ -382,9 +420,19 @@ export async function runPluginUpdateTask({ appDir, workspace, logger }) {
             warnLog(`清单声明修正失败（不影响已安装文件）: ${err.message}`);
         }
 
+        /* 6.8 同步 FPK 内置种子（须在 finally 删除暂存 tgz 前复制）：
+              runner.js 每次启动会用种子重装"版本不一致"的插件，不同步则
+              重启即回退到 FPK 打包时的旧版；失败时在完成消息中如实告知。 */
+        const seedErr = syncBundledSeed(appDir, stagingTgz, release.version);
+        if (seedErr !== null) {
+            warnLog(`内置种子同步失败: ${seedErr}`);
+        }
+
         /* 7. 成功：不重启宿主，提示用户重启使新版本生效。 */
         setState('done_pending_restart',
-            `插件已更新到 ${release.version}，请重启 DeepSeek Harness 使新版本生效`,
+            seedErr === null
+                ? `插件已更新到 ${release.version}，请重启 DeepSeek Harness 使新版本生效`
+                : `插件已更新到 ${release.version}，但内置种子同步失败（${seedErr}），重启后可能回退到旧版，建议重新安装 FPK`,
             { finishedAt: new Date().toISOString(), targetVersion: release.version });
         log(`插件更新完成（${installed} → ${release.version}），等待用户重启生效`);
     } catch (err) {

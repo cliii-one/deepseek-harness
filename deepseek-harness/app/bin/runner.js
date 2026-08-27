@@ -163,20 +163,29 @@ function readBundledPluginList() {
 }
 
 /**
- * 从 profile 的 package.json 中读取指定插件当前安装的版本号
+ * 读取指定插件当前安装的版本号（0.4.12 修正为以实际落盘为准）
+ * 优先读 profile/node_modules 里插件自身的 package.json（权威：
+ * FPK 安装会把清单声明写成 file:/…tgz 而非版本号，且在线更新装好
+ * 未重启时只有这里是新版本号）；读不到再回退清单 dependencies 声明。
  * @param {string} profileDir 插件 profile 目录
  * @param {string} pkgName 插件包名（如 dshmarket）
  * @returns {string|null} 已安装版本号；查不到返回 null
  */
 function getInstalledPluginVersion(profileDir, pkgName) {
     try {
+        const installedPkg = path.join(profileDir, 'node_modules', pkgName, 'package.json');
+        if (fs.existsSync(installedPkg)) {
+            const ver = JSON.parse(fs.readFileSync(installedPkg, 'utf-8')).version;
+            if (ver) return String(ver);
+        }
         const pkgJsonPath = path.join(profileDir, 'package.json');
-        if (!fs.existsSync(pkgJsonPath)) return null;
-        const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf-8'));
-        const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
-        for (const [name, ver] of Object.entries(deps)) {
-            // 兼容 scoped 包名（@a/b）与非 scoped 名的匹配
-            if (name === pkgName || name.endsWith(`/${pkgName}`)) return ver;
+        if (fs.existsSync(pkgJsonPath)) {
+            const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf-8'));
+            const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+            for (const [name, ver] of Object.entries(deps)) {
+                // 兼容 scoped 包名（@a/b）与非 scoped 名的匹配
+                if (name === pkgName || name.endsWith(`/${pkgName}`)) return ver;
+            }
         }
     } catch (e) {}
     return null;
@@ -214,6 +223,20 @@ function syncPluginSeeds() {
 }
 
 /**
+ * 简易 semver 数字段比较（x.y.z）：a>b 返回 1，a<b 返回 -1，不可解析返回 null。
+ * 种子与已装版本均为纯 semver，无需完整 semver 规范实现。
+ */
+function compareSimpleSemver(a, b) {
+    const pa = String(a).split('.').map(Number);
+    const pb = String(b).split('.').map(Number);
+    if (pa.some(Number.isNaN) || pb.some(Number.isNaN) || pa.length < 3 || pb.length < 3) return null;
+    for (let i = 0; i < 3; i++) {
+        if (pa[i] !== pb[i]) return pa[i] > pb[i] ? 1 : -1;
+    }
+    return 0;
+}
+
+/**
  * 首次启动把内置插件离线装入 DSH profile（同步执行，阻塞在 dsh 启动前）。
  * 升级场景：应用升级后种子里的 tgz 版本比 profile 已装版本新时自动重装。
  */
@@ -229,11 +252,14 @@ function installBundledPlugins() {
     for (const tgz of plugins) {
         const { name: pkgName, version: seedVer } = parseTgzName(tgz);
         const installedVer = getInstalledPluginVersion(profileDir, pkgName);
-        // 幂等规则：只有"种子 tgz 版本与已装版本一致"时才跳过重装；
-        // 种子随应用包升级出新版本（installedVer < 或 != seedVer）时必须重装，
-        // 否则应用升级后 profile 里永远停留在旧插件 —— 这正是
-        // "升级了 FPK 但 dsh-selfupdater 仍是旧版"的根因。
-        if (installedVer && seedVer && installedVer === seedVer) continue;
+        // 幂等规则（0.4.12 修正）：种子版本不高于已装版本就跳过。
+        // - 相等：内容一致，无需重装；
+        // - 种子更旧：说明插件已在线自我更新到更高版本，绝不能用 FPK 旧种子
+        //   降级重装 —— 旧规则"仅相等才跳过"正是"在线更新成功但重启后版本
+        //   回退"的根因；
+        // - 种子更新（FPK 应用升级带来新版）：正常重装。
+        const cmp = compareSimpleSemver(seedVer, installedVer);
+        if (installedVer && seedVer && cmp !== null && cmp <= 0) continue;
         console.log(`[Runner] 正在内置安装插件: ${tgz}${installedVer ? `（当前 ${installedVer} -> 目标 ${seedVer ?? 'unknown'}）` : ''} -> profile "${DSH_PLUGIN_PROFILE}"...`);
         // dsh plugin add <tgz>：与手动执行 `dsh plugin --profile web add xxx` 等价
         const r = spawnSync(NODE_BIN, [DSH_BIN, 'plugin', '--profile', DSH_PLUGIN_PROFILE, 'add', path.join(seedDir, tgz)], {

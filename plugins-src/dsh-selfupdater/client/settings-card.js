@@ -70,13 +70,18 @@ async function api(path, options) {
 /** 各小节消息的"首次出现"记录（dsh / plugin 两个通道独立计时）。 */
 const msgSeen = { dsh: { text: '', at: 0 }, plugin: { text: '', at: 0 } };
 
+/** 需要持续显示消息的终态（完成/失败类）："请重启生效/失败原因"不能被 TTL 藏掉。 */
+const FINAL_MSG_STATES = ['done', 'done_failed', 'done_pending_restart', 'error'];
+
 /**
  * 按时效过滤消息：新文本重置计时并显示；相同文本未超时继续显示；
  * 超过 MSG_TTL_MS 返回空串（隐藏）。切换菜单回来时轮询仍在跑，
- * 过期消息自然不再渲染。
+ * 过期消息自然不再渲染。终态（完成/失败）消息豁免 TTL，持续显示
+ * 直到状态变化 —— 用户必须清楚看到"更新成功需重启"或失败原因。
  */
-function agedMessage(section, text) {
+function agedMessage(section, text, isFinal) {
     if (typeof text !== 'string' || text === '') return '';
+    if (isFinal) return text; // 终态不参与计时
     const seen = msgSeen[section];
     if (text !== seen.text) {
         seen.text = text;
@@ -638,8 +643,11 @@ function apply(ctx) {
     async function pollStatus() {
         try {
             const data = await api('/status');
-            // 消息按时效过滤后再生效：过期提示不再渲染（见 agedMessage 注释）。
-            latestStatus = { ...data, message: agedMessage('dsh', data.message) };
+            // 消息按时效过滤：普通提示过期隐藏；终态（完成/失败）持续显示。
+            latestStatus = {
+                ...data,
+                message: agedMessage('dsh', data.message, FINAL_MSG_STATES.includes(data.state)),
+            };
             upgradeStarting = false; // 服务端状态已接管视觉
         } catch { /* 服务重启期间拉不到状态属正常：保持 starting 视觉 */ }
         refresh();
@@ -668,8 +676,10 @@ function apply(ctx) {
             pluginData = data; // 响应本身就是单对象：{ currentVersion, latestVersion, ... }
             pluginBusy = data.busy === true || PLUGIN_BUSY_STATES.includes(data.state);
             if (!pluginBusy) {
-                // 空闲时才显示消息，且按时效过滤：过期提示（如"发现新版本"）自动隐藏。
-                pluginMsg = agedMessage('plugin', data.message);
+                // 空闲时才显示消息：普通提示（发现新版本/已是最新）按时效隐藏；
+                // 终态（已装待重启/失败原因）豁免 TTL 持续显示，确保用户看到结果。
+                const isFinal = FINAL_MSG_STATES.includes(data.state);
+                pluginMsg = agedMessage('plugin', data.message, isFinal);
             }
             // 服务端 busy 或终态已可见：乐观标志功成身退。
             if (pluginBusy || data.state === 'done_pending_restart' || data.state === 'error') {
