@@ -208,14 +208,39 @@ export function apply(ctx) {
             });
         }
 
+        /**
+         * DSH 状态归一化（对齐插件 done_pending_restart 归位经验）：
+         * - 升级成功后 updater 置 state=done / done_failed 并写入 latestVersion；
+         * - 重启后当前版本已追平 latestVersion 时，"升级完成"已生效，不应一直挂着成功徽章；
+         * - 读取时若判定已生效则归位为 idle 并覆写磁盘，避免每次请求重复判定。
+         * - 最终态 done_pending_restart 理论上不会出现在 DSH 链路，但一并处理以防残留。
+         */
+        const dshStatusView = () => {
+            const raw = readStatus(dshStateDir);
+            const baseState = isBusy() ? (raw.state ?? 'running') : (raw.state ?? 'idle');
+            const finalsToSettle = ['done', 'done_failed', 'done_pending_restart'];
+            if (finalsToSettle.includes(baseState) && typeof raw.latestVersion === 'string' && raw.latestVersion !== '') {
+                const currentNow = currentDshVersion(appDir);
+                if (currentNow !== 'unknown' && isNewer(raw.latestVersion, currentNow) === false) {
+                    const settled = { ...raw, state: 'idle', message: null };
+                    writeStatus(dshStateDir, settled);
+                    return { ...settled, state: 'idle' };
+                }
+            }
+            return { ...raw, state: baseState };
+        };
+
         /* ---------- GET /dsh-selfupdater/status ---------- */
         registerRoute('GET', '/dsh-selfupdater/status', (_req, res) => {
-            const status = readStatus(dshStateDir);
+            const status = dshStatusView();
             const current = currentDshVersion(appDir);
+            const latest = status.latestVersion ?? null;
             sendJson(res, 200, {
                 currentVersion: current,
-                latestVersion: status.latestVersion ?? null,
-                state: isBusy() ? (status.state ?? 'running') : (status.state ?? 'idle'),
+                latestVersion: latest,
+                // 后端权威判定是否可更新，避免前端仅靠字符串 !== 误判预发布版本号
+                updateAvailable: typeof latest === 'string' && latest !== '' ? isNewer(latest, current) === true : false,
+                state: status.state ?? 'idle',
                 message: status.message ?? null,
                 lastCheck: status.updatedAt ?? null,
             });
@@ -266,7 +291,9 @@ export function apply(ctx) {
                 return;
             }
             // 预置锁文件：updater.mjs 启动后会校验它存在才继续。
+            // 先确保 .dsh 目录存在（首次安装/手动清理后可能尚无该目录，教训来自插件写状态 ENOENT 问题）。
             try {
+                mkdirSync(dshStateDir, { recursive: true });
                 writeFileSync(lockFile, JSON.stringify({ pid: process.pid, startedAt: Date.now(), by: 'plugin' }));
             } catch (err) {
                 sendJson(res, 500, { error: `写入锁文件失败：${err.message}` });

@@ -176,7 +176,10 @@ function setState(state, message, extra = {}) {
         updatedAt: new Date().toISOString(),
         ...extra,
     };
-    try { writeFileSync(statusFile, JSON.stringify({ ...status, pid: process.pid }, null, 2)); } catch { /* 同上 */ }
+    try {
+        mkdirSync(dshStateDir, { recursive: true });
+        writeFileSync(statusFile, JSON.stringify({ ...status, pid: process.pid }, null, 2));
+    } catch { /* 状态落盘失败不阻断主流程（首次运行时 .dsh 可能尚不存在） */ }
     log(`state=${state}${message ? ` :: ${message}` : ''}`);
 }
 
@@ -226,20 +229,60 @@ function pnpmCommand() {
  * 升级各阶段
  * ------------------------------------------------------------------ */
 
+/** npm registry 查询超时。 */
+const FETCH_TIMEOUT_MS = 15000;
+/** 国内 npm 镜像（腾讯云），直连官方源超时时的第一回退。 */
+const NPM_CHINA_MIRROR = 'https://mirrors.cloud.tencent.com/npm';
+
+/** 本次要依次尝试的 registry 地址列表（去重）。 */
+function registryCandidates() {
+    const custom = process.env.DSHSU_REGISTRY_URL?.replace(/\/+$/, '');
+    const list = [custom, NPM_CHINA_MIRROR, 'https://registry.npmjs.org'];
+    return [...new Set(list.filter((v) => typeof v === 'string' && v !== ''))];
+}
+
 /**
- * 从 npm registry 查询目标包的最新版本号。
- * 直接读完整 packument 的 dist-tags.latest，网络异常抛错由上层处理。
+ * 从单个 registry 的 /latest 版本级端点取文档（含 dist.tarball）。
+ * 用版本级端点而非整包 packument：后者会被 Fastly 等 CDN 长时间缓存，
+ * 出现"包已发布但查不到新版"的假象（插件 0.4.5 踩坑根因）。
  */
-async function fetchLatestVersion(pkg) {
-    const res = await fetch(`https://registry.npmjs.org/${encodeURIComponent(pkg)}`, {
+async function fetchVersionDoc(base, pkg) {
+    const res = await fetch(`${base}/${encodeURIComponent(pkg)}/latest`, {
         headers: { accept: 'application/json', 'user-agent': 'dsh-selfupdater' },
-        signal: AbortSignal.timeout(15000),
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
-    if (!res.ok) throw new Error(`registry 查询失败: HTTP ${res.status}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const doc = await res.json();
-    const latest = doc?.['dist-tags']?.latest;
-    if (typeof latest !== 'string' || latest === '') throw new Error('registry 未返回 latest 版本号');
-    return latest;
+    if (typeof doc?.version !== 'string' || doc.version === '') throw new Error('响应缺少 version 字段');
+    return { version: doc.version, tarball: doc?.dist?.tarball ?? null };
+}
+
+/**
+ * 查询最新版本与下载地址（与 plugin-update-task.mjs 完全一致）。
+ *
+ * 0.4.14 经验复用：旧实现"第一个成功的 registry 就采用"，腾讯镜像 /latest 端点
+ * CDN 缓存陈旧时仍返回旧版本，导致"检查拿到新版、执行却被旧版骗过"而误判
+ * "无需更新"。改为并行查询全部 registry、取 semver 最大的结果。
+ */
+async function fetchLatestRelease(pkg) {
+    const candidates = registryCandidates();
+    const results = await Promise.allSettled(candidates.map((base) => fetchVersionDoc(base, pkg)));
+    let best = null;
+    const errors = [];
+    results.forEach((r, i) => {
+        if (r.status === 'fulfilled') {
+            if (best === null || isNewer(r.value.version, best.version)) best = r.value;
+        } else {
+            errors.push(`${candidates[i]}: ${r.reason.message}`);
+        }
+    });
+    if (best === null) throw new Error(errors.join('；'));
+    return best;
+}
+
+/** 仅取最新版本号（主流程使用）。 */
+async function fetchLatestVersion(pkg) {
+    return (await fetchLatestRelease(pkg)).version;
 }
 
 /**

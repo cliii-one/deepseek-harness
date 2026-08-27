@@ -392,8 +392,8 @@ function headBadge(text, isNew) {
 function UpdateCard({ t, status, busy, checking, onCheck, onUpgrade,
     plugin, pluginBusy, pluginChecking, pluginMsg, onPluginCheck, onPluginUpgrade }) {
 
-    const updateAvailable = status?.latestVersion != null
-        && status.latestVersion !== status.currentVersion;
+    // 与插件小节保持一致：以后端 semver 权威判定为准，避免仅靠字符串 !== 误判预发布版本号
+    const updateAvailable = status?.updateAvailable === true;
     const stage = STATE_LABELS[status?.state] ?? '';
 
     // DSH 小节结果消息的语义着色：成功绿 / 失败红 / 其余灰。
