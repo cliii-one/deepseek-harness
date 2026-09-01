@@ -648,7 +648,10 @@ function apply(ctx) {
                 ...data,
                 message: agedMessage('dsh', data.message, FINAL_MSG_STATES.includes(data.state)),
             };
-            upgradeStarting = false; // 服务端状态已接管视觉
+            // 仅当服务端给出"进行中"或终态时才撤销乐观视觉：perform 受理初期
+            // 状态可能仍是旧的 idle，若此时撤销会退回"发现新版本"且按钮恢复
+            // 可点，造成重复点击（0.4.19 实测踩坑）。
+            if (isBusyState(latestStatus) || FINAL_MSG_STATES.includes(data.state)) upgradeStarting = false;
         } catch { /* 服务重启期间拉不到状态属正常：保持 starting 视觉 */ }
         refresh();
         // 升级中高频轮询，空闲低频保活。

@@ -310,6 +310,15 @@ export function apply(ctx) {
                 sendJson(res, 500, { error: `写入锁文件失败：${err.message}` });
                 return;
             }
+            // 受理即落盘 running 状态：给前端乐观视觉一个服务端依据（转圈 + 按钮禁用），
+            // 避免宿主退出前轮询仍读到旧的 idle/"发现新版本" 而误判升级没发生、
+            // 允许重复点击。latestVersion 等历史字段原样保留，供归位判定使用。
+            writeStatus(dshStateDir, {
+                ...readStatus(dshStateDir),
+                state: 'running',
+                message: '升级已受理，服务即将切换到升级脚本…',
+                updatedAt: new Date().toISOString(),
+            });
             const child = spawn(process.execPath, [
                 join(PLUGIN_ROOT, 'lib', 'updater.mjs'),
                 '--pid', String(process.pid),
