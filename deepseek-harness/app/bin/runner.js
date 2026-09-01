@@ -259,7 +259,12 @@ function installBundledPlugins() {
         //   回退"的根因；
         // - 种子更新（FPK 应用升级带来新版）：正常重装。
         const cmp = compareSimpleSemver(seedVer, installedVer);
-        if (installedVer && seedVer && cmp !== null && cmp <= 0) continue;
+        if (installedVer && seedVer && cmp !== null && cmp <= 0) {
+            // 跳过决策留痕：便于排查"插件版本被回退"类问题（回退到底发生在
+            // runner 重装还是 pnpm 依赖重算，一看日志便知）。
+            console.log(`[Runner] 插件 ${pkgName}: 已装 ${installedVer} >= 种子 ${seedVer}，跳过内置安装`);
+            continue;
+        }
         console.log(`[Runner] 正在内置安装插件: ${tgz}${installedVer ? `（当前 ${installedVer} -> 目标 ${seedVer ?? 'unknown'}）` : ''} -> profile "${DSH_PLUGIN_PROFILE}"...`);
         // dsh plugin add <tgz>：与手动执行 `dsh plugin --profile web add xxx` 等价
         const r = spawnSync(NODE_BIN, [DSH_BIN, 'plugin', '--profile', DSH_PLUGIN_PROFILE, 'add', path.join(seedDir, tgz)], {

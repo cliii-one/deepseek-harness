@@ -376,19 +376,45 @@ function launchRunnerChain() {
         env: { ...process.env, TRIM_APPDEST: appDir },
     });
     child.unref();
+    // 用新 runner 的 PID 覆盖飞牛守护的 PID 文件：守护探活恢复正常认知，
+    // 后续自愈/状态轮询不会因 PID 文件指向死进程而拉起竞争实例。
+    writeSupervisorPidFile(child.pid);
     log(`已拉起 runner 链 (pid=${child.pid})`);
 }
 
 /**
- * 健康检查：轮询本地端口直到有任意 HTTP 响应（服务能应答即算活着，
- * 不苛求 200 —— 登录页/404 都证明 Web 服务已起来）。
+ * 飞牛守护 PID 文件握手（0.4.23 新增，修复守护竞态）：
+ * 宿主为升级退出后，守护的 PID 文件指向死进程，升级窗口（1~2 分钟）内
+ * 任何一次守护自愈/状态轮询/手动启停都会按"服务未运行"拉起竞争实例，
+ * 与本脚本的下载/换装/拉起互相踩踏（12:01~12:04 实测踩坑）。
+ * 对策：升级期间把本脚本 PID 写入 PID 文件 —— 守护 kill -0 探活认为
+ * "应用仍在运行"，不会另起实例；结束后由 launchRunnerChain 用新 runner
+ * PID 覆盖。本脚本若中途死亡，PID 失效，守护自然兜底拉起，行为闭环。
+ */
+const supervisorPidFile = process.env.TRIM_PKGVAR
+    ? join(process.env.TRIM_PKGVAR, `${process.env.TRIM_APPNAME || 'deepseek-harness'}.pid`)
+    : null;
+
+function writeSupervisorPidFile(pid) {
+    if (!supervisorPidFile) return;
+    try {
+        writeFileSync(supervisorPidFile, String(pid));
+        log(`已写入守护 PID 文件: ${supervisorPidFile} <- ${pid}`);
+    } catch { /* 非飞牛环境或权限不足时静默跳过 */ }
+}
+
+/**
+ * 健康检查：轮询本地端口，要求 2xx 才算健康。
+ * 0.4.23 修正：旧实现"有任何 HTTP 响应即算活"，若探测链路上存在错误页
+ * 中间层（如代理在后端死亡时返回 502 页面），会把故障误判为健康、
+ * 错过回滚时机 —— "侥幸正确"必须变成"设计正确"。
  */
 async function waitHealthy(timeoutMs) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
         try {
-            await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(3000) });
-            return true;
+            const res = await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(3000) });
+            if (res.ok) return true;
         } catch { /* 未就绪继续等 */ }
         await sleep(2000);
     }
@@ -420,6 +446,8 @@ async function rollback() {
 
 async function main() {
     mkdirSync(dshStateDir, { recursive: true });
+    // 升级窗口内接管守护 PID 文件，防止飞牛守护拉起竞争实例（见上方握手注释）
+    writeSupervisorPidFile(process.pid);
     const current = currentDshVersion();
 
     // 锁文件握手：插件本体 POST /perform 会预写锁文件（by=plugin）作为并发
@@ -462,7 +490,7 @@ async function main() {
     if (await waitHealthy(90000)) {
         // 成功：清理 staging；bak 目录保留作为手动救砖的最后手段。
         rmSync(stagingDir, { recursive: true, force: true });
-        setState('done', `升级完成：${current} -> ${target}`, { finishedAt: new Date().toISOString() });
+        setState('done', `升级完成：${current} -> ${target}。请检查插件市场的插件是否已适配新版 DSH。`, { finishedAt: new Date().toISOString() });
     } else {
         await rollback();
     }
