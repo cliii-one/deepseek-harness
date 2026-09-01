@@ -280,7 +280,8 @@ async function fetchLatestRelease(pkg) {
     const errors = [];
     results.forEach((r, i) => {
         if (r.status === 'fulfilled') {
-            if (best === null || isNewer(r.value.version, best.version)) best = r.value;
+            // 记录胜出版本来自哪个 registry，供 staging 安装用 --registry 同源下载
+            if (best === null || isNewer(r.value.version, best.version)) best = { ...r.value, base: targets[i].base };
         } else {
             errors.push(`${targets[i].base}/${targets[i].tag}: ${r.reason.message}`);
         }
@@ -289,29 +290,36 @@ async function fetchLatestRelease(pkg) {
     return best;
 }
 
-/** 仅取最新版本号（主流程使用）。 */
-async function fetchLatestVersion(pkg) {
-    return (await fetchLatestRelease(pkg)).version;
-}
-
 /**
  * 阶段一：下载。把新版安装进独立 staging 目录。
  * 关键点：pnpm 默认用符号链接布局，搬走 node_modules 后链接会全部失效；
  * 通过 node-linker=hoisted 强制实体文件布局，保证 staging/node_modules
  * 可以整体 rename 到 APP_DIR。
+ * @param target - 目标版本号（精确锁定）
+ * @param registryBase - 版本查询胜出的 registry 源，安装与查询保持同源
  */
-async function downloadIntoStaging(target) {
+async function downloadIntoStaging(target, registryBase) {
     rmSync(stagingDir, { recursive: true, force: true });
     mkdirSync(stagingDir, { recursive: true });
+    // 精确锁定版本：alpha 渠道发版快，用 ^ 范围可能解析到比 target 更新的
+    // 版本，撞上"staged 必须严格等于 target"的校验而误报失败。
     writeFileSync(
         join(stagingDir, 'package.json'),
-        JSON.stringify({ name: 'dsh-selfupdate-staging', private: true, dependencies: { [PKG]: `^${target}` } }, null, 2),
+        JSON.stringify({ name: 'dsh-selfupdate-staging', private: true, dependencies: { [PKG]: target } }, null, 2),
     );
     // 实体文件布局 + 关闭交互确认，保证无人值守可执行。
     writeFileSync(join(stagingDir, '.npmrc'), 'node-linker=hoisted\n');
     const pnpm = pnpmCommand();
     setState('downloading', `正在下载 ${PKG}@${target} …`);
-    const result = await runCommand(pnpm.file, [...pnpm.args, 'install', '--omit=dev', '--no-audit', '--no-fund'], {
+    // pnpm 不认 npm 风格的 --omit/--no-audit/--no-fund（0.4.18 实测踩坑）：
+    // 排除 dev 依赖用 --prod；--registry 让安装与版本查询走同一个源，
+    // 避免"官方源不通、镜像查到版本却装不下来"的割裂。
+    const result = await runCommand(pnpm.file, [
+        ...pnpm.args,
+        'install',
+        '--prod',
+        ...(registryBase ? ['--registry', registryBase] : []),
+    ], {
         cwd: stagingDir,
         env: { ...process.env, CI: 'true', npm_config_node_linker: 'hoisted' },
     });
@@ -420,7 +428,9 @@ async function main() {
     status = { currentVersion: current, startedAt: new Date().toISOString(), trigger: 'manual' };
     setState('downloading', '正在查询 npm 最新版本 …');
 
-    const target = await fetchLatestVersion(PKG);
+    // fetchLatestRelease 除版本号外还带回胜出的 registry 源，供 staging 同源安装
+    const release = await fetchLatestRelease(PKG);
+    const target = release.version;
     status.latestVersion = target;
     if (!isNewer(target, current)) {
         setState('idle', `当前已是最新版本（${current}）`);
@@ -428,7 +438,7 @@ async function main() {
     }
 
     log(`发现新版本：${current} -> ${target}`);
-    await downloadIntoStaging(target);
+    await downloadIntoStaging(target, release.base);
     swapNodeModules();
 
     setState('restarting', '正在重启 DeepSeek Harness …');
