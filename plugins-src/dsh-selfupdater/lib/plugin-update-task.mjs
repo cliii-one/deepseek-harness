@@ -88,8 +88,20 @@ function registryCandidates() {
     return [...new Set(list.filter((v) => typeof v === 'string' && v !== ''))];
 }
 
-/** 除 latest 外额外追踪的官方发布渠道 tag（官方习惯把新版先挂在 next/alpha 上）。 */
-const EXTRA_DIST_TAGS = ['next', 'alpha'];
+/**
+ * 追踪的发布渠道 tag 列表。
+ * 默认 latest + next，与 build.sh 的取版策略保持一致（构建 FPK 时优先
+ * dist-tags.next）：官方把 alpha 当预发布通道，可能与旧插件 client bundle
+ * 不兼容（0.1.2-alpha.3 实测升级后 web 端报 boot manifest batches must be
+ * an array 进不去），因此默认不追；仅当环境变量 DSHSU_DSH_CHANNEL 含
+ * alpha（逗号分隔）时才纳入，显式尝鲜才开启。
+ */
+function distTags() {
+    const tags = ['latest', 'next'];
+    const channels = (process.env.DSHSU_DSH_CHANNEL ?? '').split(',').map((s) => s.trim());
+    if (channels.includes('alpha')) tags.push('alpha');
+    return tags;
+}
 
 /**
  * 从单个 registry 的版本级端点（/<pkg>/<tag>）取文档（含 dist.tarball）。
@@ -121,10 +133,10 @@ async function fetchVersionDoc(base, pkg, tag = 'latest') {
  */
 async function fetchLatestRelease(pkg) {
     const candidates = registryCandidates();
-    // 每个 registry × 每个渠道 tag（latest/next/alpha）并行查询：
-    // 只查 /latest 会漏掉挂在 next/alpha tag 上的新版（0.1.2-alpha.2 实测踩坑），
-    // 与 build.sh 优先取 dist-tags.next 的官方发版习惯保持一致。
-    const tags = ['latest', ...EXTRA_DIST_TAGS];
+    // 每个 registry × 每个渠道 tag 并行查询：
+    // 只查 /latest 会漏掉挂在 next/alpha tag 上的新版（0.1.2-alpha.2 实测踩坑）；
+    // 渠道范围由 distTags() 决定（默认 latest+next，alpha 需环境变量显式开启）。
+    const tags = distTags();
     const targets = candidates.flatMap((base) => tags.map((tag) => ({ base, tag })));
     const results = await Promise.allSettled(targets.map((t) => fetchVersionDoc(t.base, pkg, t.tag)));
     let best = null;
