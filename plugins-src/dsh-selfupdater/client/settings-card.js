@@ -238,6 +238,8 @@ const CARD_CSS = `
 .dshsu-step-active{background:var(--dshsu-accent);animation:dshsu-pulse 1.1s ease-in-out infinite}
 @keyframes dshsu-pulse{50%{opacity:.35}}
 .dshsu-actions{display:flex;align-items:center;gap:8px;margin-top:2px}
+.dshsu-channel{display:flex;align-items:center;gap:6px;margin-top:8px;font-size:12px;opacity:.75;cursor:pointer;user-select:none}
+.dshsu-channel input{accent-color:var(--dshsu-accent,#c9a227)}
 .dshsu-spacer{flex:1}
 .dshsu-btn{appearance:none;border:1px solid var(--dshsu-border);border-radius:8px;cursor:pointer;
   padding:6px 14px;font-size:13px;background:transparent;color:inherit;display:inline-flex;
@@ -389,7 +391,7 @@ function headBadge(text, isNew) {
  * 上半部分 = DSH 更新小节；下半部分 = 插件更新小节。
  * 两组状态相互独立、互不阻塞；样式共享同一套 CSS 类与主题变量。
  */
-function UpdateCard({ t, status, busy, checking, onCheck, onUpgrade,
+function UpdateCard({ t, status, busy, checking, onCheck, onUpgrade, onChannelChange,
     plugin, pluginBusy, pluginChecking, pluginMsg, onPluginCheck, onPluginUpgrade }) {
 
     // 与插件小节保持一致：以后端 semver 权威判定为准，避免仅靠字符串 !== 误判预发布版本号
@@ -455,6 +457,17 @@ function UpdateCard({ t, status, busy, checking, onCheck, onUpgrade,
             status?.state === 'done' ? h('span', { className: 'dshsu-pill dshsu-pill-ok' }, t.upgraded)
                 : ['error', 'done_failed'].includes(status?.state) ? h('span', { className: 'dshsu-pill dshsu-pill-bad' }, t.failed)
                     : null,
+        ),
+        // alpha 预发布渠道开关：默认关闭（alpha 可能与旧插件 client bundle 不兼容，
+        // 0.1.2-alpha.3 实测升级后 web 端进不去），开启后检测/升级都会纳入 alpha 渠道。
+        h('label', { className: 'dshsu-channel' },
+            h('input', {
+                type: 'checkbox',
+                checked: status?.channel === 'alpha',
+                disabled: busy,
+                onChange: (e) => onChannelChange(e.target.checked === true),
+            }),
+            t.alphaChannel,
         ),
 
         /* ---- 分隔线：视觉上把 DSH 更新与插件更新分成两区 ---- */
@@ -580,6 +593,7 @@ const FALLBACK_DICT = {
         currentVersion: '当前版本', latestVersion: '最新版本',
         lastCheck: '上次检查', never: '从未', processing: '处理中…',
         updateAvailable: '可更新', upgraded: '已升级', failed: '失败',
+        alphaChannel: '追踪 alpha 预发布渠道（可能不稳定）',
         pluginNav: '插件更新',
         pluginUpdating: '插件更新进行中…', checkingLabel: '正在检查更新…',
         checkFailed: '检查更新失败',
@@ -592,6 +606,7 @@ const FALLBACK_DICT = {
         currentVersion: 'Current', latestVersion: 'Latest',
         lastCheck: 'Last check', never: 'never', processing: 'Working…',
         updateAvailable: 'Update', upgraded: 'Upgraded', failed: 'Failed',
+        alphaChannel: 'Track alpha prereleases (may be unstable)',
         pluginNav: 'Plugin Updates',
         pluginUpdating: 'Plugin update in progress…', checkingLabel: 'Checking…',
         checkFailed: 'Check failed',
@@ -742,6 +757,17 @@ function apply(ctx) {
         }
     }
 
+    /** 切换 DSH 检测渠道（alpha 预发布开关）：保存到后端并刷新回显。 */
+    async function handleChannelChange(enabled) {
+        try {
+            await api('/channel', { method: 'POST', body: JSON.stringify({ channel: enabled ? 'alpha' : 'stable' }) });
+        } catch (err) {
+            console.warn(`[${NS}] 保存渠道设置失败:`, err);
+        }
+        // 无论成败都刷新：开关以服务端落盘的真实渠道为准（保存失败会弹回）
+        await pollStatus();
+    }
+
     async function handleCheck() {
         checking = true;
         refresh();
@@ -790,6 +816,7 @@ function apply(ctx) {
                 currentVersion: dict('currentVersion'), latestVersion: dict('latestVersion'),
                 lastCheck: dict('lastCheck'), never: dict('never'), processing: dict('processing'),
                 updateAvailable: dict('updateAvailable'), upgraded: dict('upgraded'), failed: dict('failed'),
+                alphaChannel: dict('alphaChannel'),
                 pluginNav: dict('pluginNav'),
                 pluginUpdating: dict('pluginUpdating'), checkingLabel: dict('checkingLabel'),
                 pendingRestart: dict('pendingRestart'),
@@ -799,6 +826,7 @@ function apply(ctx) {
             checking,
             onCheck: handleCheck,
             onUpgrade: handleUpgrade,
+            onChannelChange: handleChannelChange,
             plugin: pluginData,
             pluginBusy: pluginBusy || pluginStarting,
             pluginChecking,

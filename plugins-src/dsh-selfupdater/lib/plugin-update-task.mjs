@@ -131,12 +131,13 @@ async function fetchVersionDoc(base, pkg, tag = 'latest') {
  *
  * @returns {{version: string, tarball: string|null}} 全部失败时抛聚合错误。
  */
-async function fetchLatestRelease(pkg) {
+async function fetchLatestRelease(pkg, opts = {}) {
     const candidates = registryCandidates();
     // 每个 registry × 每个渠道 tag 并行查询：
     // 只查 /latest 会漏掉挂在 next/alpha tag 上的新版（0.1.2-alpha.2 实测踩坑）；
-    // 渠道范围由 distTags() 决定（默认 latest+next，alpha 需环境变量显式开启）。
-    const tags = distTags();
+    // 渠道范围默认由 distTags() 决定（latest+next，alpha 需环境变量显式开启），
+    // 也允许调用方显式传入 tags（DSH 检测路由按 UI 开关传入）。
+    const tags = opts.tags ?? distTags();
     const targets = candidates.flatMap((base) => tags.map((tag) => ({ base, tag })));
     const results = await Promise.allSettled(targets.map((t) => fetchVersionDoc(t.base, pkg, t.tag)));
     let best = null;
@@ -152,9 +153,9 @@ async function fetchLatestRelease(pkg) {
     return best;
 }
 
-/** 只取最新版本号（检查更新路由使用）。 */
-export async function fetchLatestVersion(pkg) {
-    return (await fetchLatestRelease(pkg)).version;
+/** 只取最新版本号（检查更新路由使用）；opts.tags 可覆盖默认渠道。 */
+export async function fetchLatestVersion(pkg, opts = {}) {
+    return (await fetchLatestRelease(pkg, opts)).version;
 }
 
 /* ------------------------------------------------------------------ *

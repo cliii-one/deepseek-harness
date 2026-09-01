@@ -230,6 +230,20 @@ export function apply(ctx) {
             return { ...raw, state: baseState };
         };
 
+        /* ---------- DSH 检测渠道设置（alpha 预发布开关） ---------- */
+        // 开关持久化在 workspace/.dsh/selfupdate-config.json，插件更新/重启都不丢。
+        // alpha 是官方预发布通道，可能与旧插件 client bundle 不兼容（0.1.2-alpha.3
+        // 实测升级后 web 端 boot 报错），因此默认关闭，由用户在设置卡片显式开启。
+        const channelFile = join(dshStateDir, 'selfupdate-config.json');
+        const readChannel = () => {
+            try {
+                return JSON.parse(readFileSync(channelFile, 'utf8'))?.channel === 'alpha' ? 'alpha' : 'stable';
+            } catch { return 'stable'; }
+        };
+        // 检测用渠道 tag 列表：stable 只看 latest+next（与 build.sh 取版策略一致）；
+        // alpha 开启后纳入 alpha 渠道（显式尝鲜）。
+        const dshTags = () => (readChannel() === 'alpha' ? ['latest', 'next', 'alpha'] : ['latest', 'next']);
+
         /* ---------- GET /dsh-selfupdater/status ---------- */
         registerRoute('GET', '/dsh-selfupdater/status', (_req, res) => {
             const status = dshStatusView();
@@ -243,6 +257,8 @@ export function apply(ctx) {
                 state: status.state ?? 'idle',
                 message: status.message ?? null,
                 lastCheck: status.updatedAt ?? null,
+                // 当前检测渠道（前端 alpha 开关的回显依据）
+                channel: readChannel(),
             });
         });
 
@@ -253,7 +269,8 @@ export function apply(ctx) {
                 return;
             }
             try {
-                const latest = await fetchLatestVersion(PKG);
+                // 渠道 tag 按 UI 开关传入：stable 只看 latest+next，alpha 开启后多查 alpha
+                const latest = await fetchLatestVersion(PKG, { tags: dshTags() });
                 const current = currentDshVersion(appDir);
                 const updateAvailable = isNewer(latest, current);
                 // 检查结果落盘（内部自动建目录），UI 刷新后仍能看到上次检查时间。
@@ -326,7 +343,12 @@ export function apply(ctx) {
                 '--workspace', workspace,
                 '--port', String(port),
                 '--pkg', PKG,
-            ], { detached: true, stdio: 'ignore', env: process.env });
+            ], {
+                detached: true,
+                stdio: 'ignore',
+                // alpha 开关透传给升级脚本（updater.mjs 的 distTags 读该环境变量）
+                env: readChannel() === 'alpha' ? { ...process.env, DSHSU_DSH_CHANNEL: 'alpha' } : process.env,
+            });
             child.unref();
 
             host.logger?.info?.(`[dsh-selfupdater] 升级进程已启动 pid=${child.pid}，主程序即将退出`);
@@ -334,6 +356,36 @@ export function apply(ctx) {
             setTimeout(() => process.exit(0), 800);
             // 先应答，让前端拿到"已受理"再等断线。
             sendJson(res, 202, { accepted: true, note: '服务将自动退出并由升级脚本接管' });
+        });
+
+        /* ---------- POST /dsh-selfupdater/channel ---------- */
+        /** 读取并解析 JSON 请求体（仅一个开关字段，无需引入框架式解析）。 */
+        const readJsonBody = (req) => new Promise((resolve) => {
+            let raw = '';
+            req.on('data', (chunk) => {
+                raw += chunk;
+                if (raw.length > 4096) { resolve({}); req.destroy(); }
+            });
+            req.on('end', () => { try { resolve(JSON.parse(raw || '{}')); } catch { resolve({}); } });
+            req.on('error', () => resolve({}));
+        });
+        registerRoute('POST', '/dsh-selfupdater/channel', async (req, res) => {
+            if (!sameOrigin(req)) {
+                sendJson(res, 403, { error: 'untrusted request' });
+                return;
+            }
+            const body = await readJsonBody(req);
+            // 只允许两个合法值，其余一律归为 stable（含 undefined/乱传）
+            const channel = body?.channel === 'alpha' ? 'alpha' : 'stable';
+            try {
+                mkdirSync(dshStateDir, { recursive: true });
+                writeFileSync(channelFile, JSON.stringify({ channel, updatedAt: new Date().toISOString() }, null, 2));
+            } catch (err) {
+                sendJson(res, 500, { error: `保存渠道设置失败：${err.message}` });
+                return;
+            }
+            host.logger?.info?.(`[dsh-selfupdater] DSH 检测渠道已切换为 ${channel}`);
+            sendJson(res, 200, { channel });
         });
 
         /* ---------- GET /dsh-selfupdater/plugins ---------- */
