@@ -258,7 +258,7 @@ export function apply(ctx) {
                 const updateAvailable = isNewer(latest, current);
                 // 检查结果落盘（内部自动建目录），UI 刷新后仍能看到上次检查时间。
                 writeStatus(dshStateDir, {
-                    ...(await Promise.resolve(readStatus(dshStateDir))),
+                    ...readStatus(dshStateDir),
                     currentVersion: current,
                     latestVersion: latest,
                     state: isBusy() ? 'running' : 'idle',

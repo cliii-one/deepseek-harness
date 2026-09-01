@@ -241,13 +241,17 @@ function registryCandidates() {
     return [...new Set(list.filter((v) => typeof v === 'string' && v !== ''))];
 }
 
+/** 除 latest 外额外追踪的官方发布渠道 tag（官方习惯把新版先挂在 next/alpha 上）。 */
+const EXTRA_DIST_TAGS = ['next', 'alpha'];
+
 /**
- * 从单个 registry 的 /latest 版本级端点取文档（含 dist.tarball）。
+ * 从单个 registry 的版本级端点（/<pkg>/<tag>）取文档（含 dist.tarball）。
  * 用版本级端点而非整包 packument：后者会被 Fastly 等 CDN 长时间缓存，
  * 出现"包已发布但查不到新版"的假象（插件 0.4.5 踩坑根因）。
+ * tag 不存在时（如包从未打过 alpha tag）registry 返回 404，由调用方 allSettled 吞掉。
  */
-async function fetchVersionDoc(base, pkg) {
-    const res = await fetch(`${base}/${encodeURIComponent(pkg)}/latest`, {
+async function fetchVersionDoc(base, pkg, tag = 'latest') {
+    const res = await fetch(`${base}/${encodeURIComponent(pkg)}/${tag}`, {
         headers: { accept: 'application/json', 'user-agent': 'dsh-selfupdater' },
         signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
@@ -266,14 +270,19 @@ async function fetchVersionDoc(base, pkg) {
  */
 async function fetchLatestRelease(pkg) {
     const candidates = registryCandidates();
-    const results = await Promise.allSettled(candidates.map((base) => fetchVersionDoc(base, pkg)));
+    // 每个 registry × 每个渠道 tag（latest/next/alpha）并行查询：
+    // 只查 /latest 会漏掉挂在 next/alpha tag 上的新版（0.1.2-alpha.2 实测踩坑），
+    // 与 build.sh 优先取 dist-tags.next 的官方发版习惯保持一致。
+    const tags = ['latest', ...EXTRA_DIST_TAGS];
+    const targets = candidates.flatMap((base) => tags.map((tag) => ({ base, tag })));
+    const results = await Promise.allSettled(targets.map((t) => fetchVersionDoc(t.base, pkg, t.tag)));
     let best = null;
     const errors = [];
     results.forEach((r, i) => {
         if (r.status === 'fulfilled') {
             if (best === null || isNewer(r.value.version, best.version)) best = r.value;
         } else {
-            errors.push(`${candidates[i]}: ${r.reason.message}`);
+            errors.push(`${targets[i].base}/${targets[i].tag}: ${r.reason.message}`);
         }
     });
     if (best === null) throw new Error(errors.join('；'));
