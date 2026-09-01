@@ -14,7 +14,7 @@
  * - 升级动作通过锁文件防并发，双端校验。
  */
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fetchLatestVersion, installedSelfVersion, isNewer, runPluginUpdateTask } from './plugin-update-task.mjs';
@@ -286,11 +286,22 @@ export function apply(ctx) {
                 return;
             }
             // 并发防护：锁文件已存在说明有升级在跑（或上次异常残留未清理）。
+            // 残留判定：锁内容损坏，或 startedAt 超过 15 分钟（升级脚本总看门狗
+            // 仅 8 分钟，超过必然已死）—— 自动清理放行，避免强杀后永久 409。
             if (isBusy()) {
-                sendJson(res, 409, { error: '已有一次升级在进行中' });
-                return;
+                let stale = false;
+                try {
+                    const prev = JSON.parse(readFileSync(lockFile, 'utf8'));
+                    stale = Date.now() - Number(prev.startedAt ?? 0) > 15 * 60 * 1000;
+                } catch { stale = true; }
+                if (!stale) {
+                    sendJson(res, 409, { error: '已有一次升级在进行中' });
+                    return;
+                }
+                try { rmSync(lockFile, { force: true }); } catch { /* 清不掉则下次再试 */ }
             }
-            // 预置锁文件：updater.mjs 启动后会校验它存在才继续。
+            // 预置锁文件：作为并发防护；updater.mjs 见到 by=plugin 的新鲜锁会
+            // 视为合法握手接管（见 updater.mjs main 的锁文件握手注释）。
             // 先确保 .dsh 目录存在（首次安装/手动清理后可能尚无该目录，教训来自插件写状态 ENOENT 问题）。
             try {
                 mkdirSync(dshStateDir, { recursive: true });

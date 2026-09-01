@@ -403,9 +403,19 @@ async function main() {
     mkdirSync(dshStateDir, { recursive: true });
     const current = currentDshVersion();
 
-    // 锁文件双端校验：插件本体触发前会检查；这里再补一道防手动重复执行。
-    if (existsSync(lockFile)) throw new Error('已有一次升级在进行中（锁文件存在）');
-    writeFileSync(lockFile, JSON.stringify({ pid: process.pid, startedAt: Date.now() }));
+    // 锁文件握手：插件本体 POST /perform 会预写锁文件（by=plugin）作为并发
+    // 防护，本脚本见到它应视为合法交接直接接管 —— 旧实现"存在即拒绝"与
+    // 插件端的预写约定自相矛盾，导致升级必然秒败（0.4.17 实测踩坑）。
+    // 仅当锁是陈旧残留（超过 10 分钟）或来源不明时才判定为重复执行。
+    if (existsSync(lockFile)) {
+        let handover = false;
+        try {
+            const prev = JSON.parse(readFileSync(lockFile, 'utf8'));
+            handover = prev?.by === 'plugin' && Date.now() - Number(prev.startedAt ?? 0) < 10 * 60 * 1000;
+        } catch { handover = false; }
+        if (!handover) throw new Error('已有一次升级在进行中（锁文件存在）');
+    }
+    writeFileSync(lockFile, JSON.stringify({ pid: process.pid, startedAt: Date.now(), by: 'updater' }));
 
     status = { currentVersion: current, startedAt: new Date().toISOString(), trigger: 'manual' };
     setState('downloading', '正在查询 npm 最新版本 …');
