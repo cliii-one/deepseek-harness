@@ -457,10 +457,13 @@ const proxyServer = http.createServer((clientReq, clientRes) => {
         delete headers['accept-encoding'];
     }
 
-    // 自动携带 token：转发路径未包含 token 时追加（token 由上方 stdout 捕获），
-    // 用户已带 token 的请求原样透传，避免重复参数
+    // 自动携带 token（仅首次握手）：新版 dsh 对带 token 的请求会 303 回干净
+    // 路径并种会话 cookie（dsh-auth-*），cookie 才是日常凭证。若对每个请求都
+    // 注入 token，/ 会陷入 303<->/ 死循环（浏览器报"重定向次数过多"），
+    // 因此已持有 dsh-auth-* cookie 的请求必须原样透传，交给后端用 cookie 鉴权。
+    const hasAuthCookie = /(?:^|;\s*)dsh-auth-/.test(clientReq.headers.cookie || '');
     let forwardPath = clientReq.url;
-    if (webToken && !/[?&]token=/.test(forwardPath)) {
+    if (webToken && !hasAuthCookie && !/[?&]token=/.test(forwardPath)) {
         forwardPath += (forwardPath.includes('?') ? '&' : '?') + `token=${webToken}`;
     }
 
@@ -546,9 +549,11 @@ proxyServer.on('upgrade', (req, socket, head) => {
         headers['sec-fetch-site'] = 'same-origin';
     }
 
-    // WebSocket 升级请求同样自动携带 token（与 HTTP 代理保持一致）
+    // WebSocket 升级请求同样自动携带 token（与 HTTP 代理保持一致；
+    // 已持有会话 cookie 的浏览器请求会自带 cookie，无需注入）
+    const hasAuthCookie = /(?:^|;\s*)dsh-auth-/.test(req.headers.cookie || '');
     let upgradePath = req.url;
-    if (webToken && !/[?&]token=/.test(upgradePath)) {
+    if (webToken && !hasAuthCookie && !/[?&]token=/.test(upgradePath)) {
         upgradePath += (upgradePath.includes('?') ? '&' : '?') + `token=${webToken}`;
     }
 
