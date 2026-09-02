@@ -404,17 +404,18 @@ function writeSupervisorPidFile(pid) {
 }
 
 /**
- * 健康检查：轮询本地端口，要求 2xx 才算健康。
- * 0.4.23 修正：旧实现"有任何 HTTP 响应即算活"，若探测链路上存在错误页
- * 中间层（如代理在后端死亡时返回 502 页面），会把故障误判为健康、
- * 错过回滚时机 —— "侥幸正确"必须变成"设计正确"。
+ * 健康检查：轮询本地端口，判定服务是否真正就绪。
+ * 0.4.23：从"有任何响应即健康"收紧为要求 res.ok，防错误页中间层误判。
+ * 0.4.24：本机实测 alpha.4 起 Web 端点启用了 token 鉴权，未带 token 访问
+ * `/` 返回 401 —— 这是真实后端的应答（服务已就绪），必须放行；
+ * 代理错误页通常是 502/503，仍会被正确拒绝。
  */
 async function waitHealthy(timeoutMs) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
         try {
             const res = await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(3000) });
-            if (res.ok) return true;
+            if (res.ok || res.status === 401 || res.status === 403) return true;
         } catch { /* 未就绪继续等 */ }
         await sleep(2000);
     }
