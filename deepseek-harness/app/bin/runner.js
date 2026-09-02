@@ -11,6 +11,7 @@ const fs = require('fs');
 const http = require('http');
 const net = require('net');
 const path = require('path');
+const readline = require('readline');
 
 const APP_DIR = process.env.TRIM_APPDEST || path.resolve(__dirname, '..');
 const VAR_DIR = process.env.TRIM_PKGVAR || path.join(APP_DIR, 'data');
@@ -404,7 +405,25 @@ const dshProcess = spawn(NODE_BIN, [DSH_BIN, 'web', '--host', '127.0.0.1', '--po
         PATH: `${path.join(APP_DIR, 'bin')}:${process.env.PATH}`,
         HOME: WORKSPACE_DIR
     },
-    stdio: 'inherit'
+    // stdout 改为管道：需要捕获 dsh 打印的 URL 提取 token（见下方 token 注入说明），
+    // 逐行回显保持日志行为与 inherit 一致
+    stdio: ['ignore', 'pipe', 'inherit']
+});
+
+// token 捕获与注入（适配新版 DSH 的 Web 端点鉴权）：
+// 新版 dsh 每次启动随机生成 token，未携带 token 访问 Web 端点一律 401。
+// runner 从 dsh stdout 的 "dsh web: http://.../?token=xxx" 行提取 token，
+// 由透明代理自动附加到所有转发请求 —— 局域网用户直接访问 3080 端口即可，
+// 无需手工拼接 URL（方案2：以 3080 可达即视为可信，豁免 token）。
+let webToken = null;
+readline.createInterface({ input: dshProcess.stdout }).on('line', (line) => {
+    console.log(line);
+    if (webToken) return;
+    const m = line.match(/[?&]token=([A-Za-z0-9._~-]+)/);
+    if (m) {
+        webToken = m[1];
+        console.log('[Runner] 已捕获 Web token，透明代理将自动携带（访问 3080 无需手动拼接）');
+    }
 });
 
 dshProcess.on('exit', (code, signal) => {
@@ -438,10 +457,17 @@ const proxyServer = http.createServer((clientReq, clientRes) => {
         delete headers['accept-encoding'];
     }
 
+    // 自动携带 token：转发路径未包含 token 时追加（token 由上方 stdout 捕获），
+    // 用户已带 token 的请求原样透传，避免重复参数
+    let forwardPath = clientReq.url;
+    if (webToken && !/[?&]token=/.test(forwardPath)) {
+        forwardPath += (forwardPath.includes('?') ? '&' : '?') + `token=${webToken}`;
+    }
+
     const options = {
         hostname: '127.0.0.1',
         port: DSH_PORT,
-        path: clientReq.url,
+        path: forwardPath,
         method: clientReq.method,
         headers
     };
@@ -520,9 +546,15 @@ proxyServer.on('upgrade', (req, socket, head) => {
         headers['sec-fetch-site'] = 'same-origin';
     }
 
+    // WebSocket 升级请求同样自动携带 token（与 HTTP 代理保持一致）
+    let upgradePath = req.url;
+    if (webToken && !/[?&]token=/.test(upgradePath)) {
+        upgradePath += (upgradePath.includes('?') ? '&' : '?') + `token=${webToken}`;
+    }
+
     const proxySocket = net.connect(DSH_PORT, '127.0.0.1', () => {
         proxySocket.write(
-            `${req.method} ${req.url} HTTP/${req.httpVersion}\r\n` +
+            `${req.method} ${upgradePath} HTTP/${req.httpVersion}\r\n` +
             Object.entries(headers)
                 .map(([k, v]) => `${k}: ${v}`)
                 .join('\r\n') +
