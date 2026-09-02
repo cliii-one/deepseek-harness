@@ -15,6 +15,7 @@ import net from 'node:net';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { applyFnosPatches } from './fnos-patches.mjs';
 
 /** 插件自身安装位置（…/node_modules/dsh-selfupdater），用于定位状态文件所在目录。 */
 const PLUGIN_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -479,6 +480,14 @@ async function main() {
 
     log(`发现新版本：${current} -> ${target}`);
     await downloadIntoStaging(target, release.base);
+
+    // fnOS 运行时补丁：插件升级路径绕过了 FPK 构建期的 patch.py，裸 npm 包
+    // 在局域网访问时会退化（settings unavailable / 403），必须在换装前对
+    // staging 补齐。任何关键补丁未命中都在此抛错中止——此时还没换装，旧版
+    // 原样保留，天然安全。
+    setState('downloading', '正在应用飞牛运行时补丁 …');
+    applyFnosPatches(stagingDir);
+
     swapNodeModules();
 
     setState('restarting', '正在重启 DeepSeek Harness …');
