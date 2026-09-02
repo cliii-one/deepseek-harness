@@ -48,10 +48,20 @@ def apply_patches(app_root):
 
                 if 'dsh-client-connection' in p and f == 'client.js':
                     before = code
+                    # alpha.4 起调用点在 pageLocation 前多了 `transport?.ownsHost === true ||`，
+                    # 兼容新旧两种形状：精确匹配旧串，未命中再用正则兜底（宽度不限的
+                    # loopback 判定表达式），两种都归一为恒真。
                     code = code.replace(
                         'isLoopback: pageLocation === void 0 || isLoopbackHostname(pageLocation.hostname),',
                         'isLoopback: true, // fnOS fix (Issue #2): trust proxy/control panel access as loopback'
                     )
+                    if code == before:
+                        code = re.sub(
+                            r'isLoopback:\s*(?:transport\?\.ownsHost\s*===\s*true\s*\|\|\s*)?'
+                            r'pageLocation\s*===\s*void\s*0\s*\|\|\s*isLoopbackHostname\(pageLocation\.hostname\),',
+                            'isLoopback: true, // fnOS fix (Issue #2): trust proxy/control panel access as loopback',
+                            code,
+                        )
                     changed = changed or code != before
 
                 # 2. 定制 dsh-host-directory-picker-browse 飞牛共享目录
