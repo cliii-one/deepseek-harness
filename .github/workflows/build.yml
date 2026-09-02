@@ -13,9 +13,17 @@ on:
           - x86
           - all
       version:
-        description: 'DSH版本号（留空则自动解析最新版）'
+        description: 'DSH版本号（留空则按渠道自动解析最新版）'
         required: false
         default: ''
+      channel:
+        description: '打包渠道：stable=next稳定渠道, alpha=测试渠道'
+        required: true
+        default: 'stable'
+        type: choice
+        options:
+          - stable
+          - alpha
 
 permissions:
   contents: write
@@ -28,14 +36,21 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.resolve.outputs.version }}
+      channel: ${{ steps.resolve.outputs.channel }}
     steps:
       - name: 解析 DSH 版本
         id: resolve
         run: |
+          # 渠道映射：stable -> dist-tags.next；alpha -> dist-tags.alpha（测试渠道）
+          case "${{ inputs.channel }}" in
+            alpha) TAG="alpha" ;;
+            *)     TAG="next" ;;
+          esac
+          echo "channel=${{ inputs.channel }}" >> $GITHUB_OUTPUT
           if [ -n "${{ inputs.version }}" ]; then
             VER="${{ inputs.version }}"
           else
-            VER=$(npm view @deepseek-ai/dsh dist-tags.next 2>/dev/null || true)
+            VER=$(npm view @deepseek-ai/dsh "dist-tags.${TAG}" 2>/dev/null || true)
             [ -z "$VER" ] && VER=$(npm view @deepseek-ai/dsh@latest version 2>/dev/null || true)
             if [ -z "$VER" ]; then
               echo "ERROR: 无法从 npm 解析版本号，请在触发时手动填写 version" >&2
@@ -43,7 +58,7 @@ jobs:
             fi
           fi
           echo "version=$VER" >> $GITHUB_OUTPUT
-          echo "本次构建使用 DSH 版本: $VER"
+          echo "本次构建使用 DSH 版本: $VER (channel=${{ inputs.channel }}, dist-tag=${TAG})"
 
   build-arm:
     name: 构建 ARM64
@@ -67,6 +82,7 @@ jobs:
         env:
           TARBALL_ARCH: arm64
           VERSION: ${{ needs.resolve.outputs.version }}
+          DSH_CHANNEL: ${{ needs.resolve.outputs.channel }}
         run: bash build.sh
 
       # 从 build.sh 产出的 app.tgz 中提取实际 DSH 版本号
@@ -156,6 +172,7 @@ jobs:
         env:
           TARBALL_ARCH: amd64
           VERSION: ${{ needs.resolve.outputs.version }}
+          DSH_CHANNEL: ${{ needs.resolve.outputs.channel }}
         run: bash build.sh
 
       - name: 获取 DSH 版本号
@@ -265,7 +282,9 @@ jobs:
           HAS_ARM="${{ steps.version.outputs.has_arm }}"
           HAS_X86="${{ steps.version.outputs.has_x86 }}"
 
-          BODY="## DeepSeek Harness v${VER}\n\n### 📦 下载\n\n| 文件 | 架构 | 适用设备 |\n|------|------|----------|\n"
+          # 渠道标识进入 Release 标题与说明，便于区分稳定版/测试版
+          CHANNEL="${{ inputs.channel }}"
+          BODY="## DeepSeek Harness v${VER}（${CHANNEL} 渠道）\n\n### 📦 下载\n\n| 文件 | 架构 | 适用设备 |\n|------|------|----------|\n"
 
           if [ "$HAS_X86" = "true" ]; then
             BODY="${BODY}| \`deepseek-harness_${VER}_x86.fpk\` | x86_64 | Intel/AMD NAS |\n"
