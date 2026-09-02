@@ -19,9 +19,19 @@ if [ -z "${NODE_VERSION}" ]; then
     NODE_VERSION="24.4.0"
 fi
 
-# 默认自动解析官方 npm 的 next / latest 版本，网络不可达时兜底为 meta.env 中的值
+# 打包渠道：stable(默认) = next 稳定渠道；alpha = 测试渠道（官方预发布版本）
+# 用法：DSH_CHANNEL=alpha bash scripts/build.sh
+DSH_CHANNEL="${DSH_CHANNEL:-stable}"
+case "${DSH_CHANNEL}" in
+  stable) DIST_TAG="next" ;;
+  alpha)  DIST_TAG="alpha" ;;
+  *) echo "Unsupported DSH_CHANNEL=${DSH_CHANNEL} (可选: stable / alpha)" >&2; exit 1 ;;
+esac
+
+# 默认自动解析官方 npm 对应渠道的最新版本，网络不可达时兜底为 meta.env 中的值；
+# 显式指定 VERSION 时优先级最高（如 VERSION=0.1.2-alpha.4 可锁定任意版本）
 if [ -z "${VERSION:-}" ] || [ "${VERSION}" = "latest" ] || [ "${VERSION}" = "" ]; then
-    RESOLVED_VER=$(npm view @deepseek-ai/dsh dist-tags.next 2>/dev/null || true)
+    RESOLVED_VER=$(npm view "@deepseek-ai/dsh" "dist-tags.${DIST_TAG}" 2>/dev/null || true)
     if [ -z "$RESOLVED_VER" ]; then
         RESOLVED_VER=$(npm view @deepseek-ai/dsh@latest version 2>/dev/null || echo "${DSH_FALLBACK_VERSION}")
     fi
@@ -48,7 +58,7 @@ esac
 NODE_ARCHIVE="node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz"
 NODE_URL="https://nodejs.org/dist/v${NODE_VERSION}/${NODE_ARCHIVE}"
 
-echo "==> Building DeepSeek Harness ${VERSION} for ${TARBALL_ARCH} (Node ${NODE_VERSION})"
+echo "==> Building DeepSeek Harness ${VERSION} [channel=${DSH_CHANNEL}] for ${TARBALL_ARCH} (Node ${NODE_VERSION})"
 
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
