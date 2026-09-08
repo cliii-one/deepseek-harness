@@ -529,7 +529,7 @@ async function main() {
     // staging 补齐。任何关键补丁未命中都在此抛错中止——此时还没换装，旧版
     // 原样保留，天然安全。
     setState('downloading', '正在应用飞牛运行时补丁 …');
-    applyFnosPatches(stagingDir);
+    applyFnosPatches(stagingDir, (msg) => log(msg));
 
     swapNodeModules();
 

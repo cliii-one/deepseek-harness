@@ -107,8 +107,9 @@ function patchCode(code, filePath) {
  * 任何关键补丁未命中都抛错——调用方（updater.mjs）在换装前中止升级，
  * 旧版保持原样，天然安全。
  * @param {string} appRoot - 含 node_modules 的应用根目录（staging 与其同构）
+ * @param {(msg: string) => void} [log] - 可选日志函数（升级脚本传入后写入 selfupdate.log）
  */
-export function applyFnosPatches(appRoot) {
+export function applyFnosPatches(appRoot, log = () => {}) {
     const at = join(appRoot, 'node_modules', '@deepseek-ai');
     if (!existsSync(at)) throw new Error('找不到 node_modules/@deepseek-ai，staging 结构异常');
 
@@ -139,5 +140,5 @@ export function applyFnosPatches(appRoot) {
     if (missed.length > 0) {
         throw new Error(`关键补丁未命中: ${missed.join('、')}（上游代码可能已变更，需同步更新 fnos-patches.mjs 与 patch.py）`);
     }
-    console.log(`[fnos-patches] 补丁应用完成: ${patched} 个文件, 关键标记全部命中`);
+    log(`[fnos-patches] 补丁应用完成: ${patched} 个文件, 关键标记全部命中`);
 }
