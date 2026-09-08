@@ -387,9 +387,10 @@ async function downloadIntoStaging(target, registryBase) {
         throw new Error(`staging 安装失败(pnpm exit ${result.code}): ${result.stderr.slice(-400)}`);
     }
     // pnpm 对失败的构建脚本仅告警不拦截（cnoke 缺 cmake 时就是这样静默失败的），
-    // 必须把输出尾部落盘，问题才可诊断。
-    if (result.stdout.trim()) log(`[pnpm] 输出尾部: ${result.stdout.trim().slice(-500).replace(/\s*\n+\s*/g, ' | ')}`);
-    if (result.stderr.trim()) log(`[pnpm] 告警尾部: ${result.stderr.trim().slice(-500).replace(/\s*\n+\s*/g, ' | ')}`);
+    // 必须把输出尾部落盘，问题才可诊断。尾部保留 3000 字符：500 字符在多包
+    // 并行构建时会截掉关键包的输出（0.4.28 排查 koffi 时被截断坑了一把）。
+    if (result.stdout.trim()) log(`[pnpm] 输出尾部: ${result.stdout.trim().slice(-3000).replace(/\s*\n+\s*/g, ' | ')}`);
+    if (result.stderr.trim()) log(`[pnpm] 告警尾部: ${result.stderr.trim().slice(-3000).replace(/\s*\n+\s*/g, ' | ')}`);
     // 校验装到的确实是目标版本，防止镜像滞后悄悄装了旧版。
     const staged = JSON.parse(readFileSync(join(stagingDir, 'node_modules', PKG, 'package.json'), 'utf8')).version;
     if (staged !== target) throw new Error(`staging 版本不符：期望 ${target}，实际 ${staged}`);
@@ -399,15 +400,37 @@ async function downloadIntoStaging(target, registryBase) {
 }
 
 /**
+ * koffi 原生二进制存在性校验（2.x / 3.x 双结构兼容）。
+ * - 2.x：cnoke 把 prebuild 解压到 koffi/build/koffi/<平台>/koffi.node；
+ * - 3.x 起架构重构：二进制改为 @koromix/koffi-<os>-<arch> 平台子包分发
+ *   （esbuild 模式），主包 build/ 下不再落任何 .node —— 只认老路径会把
+ *   装好的 3.x 误判为缺失（0.4.28 实测踩坑，升级被自家校验拦下）。
+ * 任一结构命中即视为齐备。
+ */
+function koffiBinaryFound() {
+    // 2.x 老结构：build/ 下递归找 .node
+    if (findFileByExt(join(stagingDir, 'node_modules', 'koffi', 'build'), '.node')) return true;
+    // 3.x 新结构：@koromix/koffi-<os>-<arch> 平台子包任一含 .node 即通过
+    try {
+        const koromixDir = join(stagingDir, 'node_modules', '@koromix');
+        for (const entry of readdirSync(koromixDir, { withFileTypes: true })) {
+            if (entry.isDirectory() && entry.name.startsWith('koffi-')
+                && findFileByExt(join(koromixDir, entry.name), '.node')) return true;
+        }
+    } catch { /* 无 @koromix 目录：2.x 或平台包未装上 */ }
+    return false;
+}
+
+/**
  * 校验 staging 内原生模块的构建产物是否齐全。
- * - koffi：cnoke --prebuild 从 vendor 解压，产物在 build/koffi/ 下的 .node；
+ * - koffi：见 koffiBinaryFound（2.x/3.x 双结构兼容）；
  * - fs-ext：node-gyp 编译，产物在 build/Release/fs-ext.node（NAS 需编译工具链）。
  * 任一缺失即抛错，终止本次升级（尚未换装，旧版原样运行，天然安全）。
  */
 function verifyNativeModules() {
     const problems = [];
-    if (!findFileByExt(join(stagingDir, 'node_modules', 'koffi', 'build'), '.node')) {
-        problems.push('koffi 缺少原生二进制（install 脚本未执行或 prebuild 解压失败）');
+    if (!koffiBinaryFound()) {
+        problems.push('koffi 缺少原生二进制（install 脚本未执行或平台子包未装上）');
     }
     const fsExtDir = join(stagingDir, 'node_modules', 'fs-ext');
     if (!existsSync(join(fsExtDir, 'fs-ext.js'))) {
