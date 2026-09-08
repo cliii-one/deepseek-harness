@@ -15,6 +15,7 @@ import net from 'node:net';
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync
 , rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { applyFnosPatches } from './fnos-patches.mjs';
 
@@ -227,6 +228,35 @@ function pnpmCommand() {
     throw new Error('找不到随应用打包的 pnpm，无法在 staging 安装新版');
 }
 
+/**
+ * 确保 koffi 编译所需的 cmake 可用：koffi 的 cnoke 构建系统依赖 CMake >= 3.10，
+ * 其 npm 包内只有编译头文件、没有预编译二进制，NAS 缺 cmake 时脚本会静默失败
+ * （pnpm 对失败的构建脚本仅告警不拦截），导致换装后的宿主 boot 崩溃。
+ * - 已存在 → 返回 null（无需注入 PATH）；
+ * - 缺失 → 尝试 python3 -m pip install --user cmake（Debian 12+ 需
+ *   --break-system-packages 绕过 PEP 668），成功后把 ~/.local/bin 前置进 PATH；
+ * - 仍不可用 → 抛错并给出手动安装指引（此时尚未开始下载，升级干净中止）。
+ * @returns {Promise<string|null>} 需要前置到 PATH 的目录（无需时为 null）
+ */
+async function ensureCmake() {
+    const localBin = join(process.env.HOME || homedir(), '.local', 'bin');
+    const probe = (extraEnv) => runCommand('cmake', ['--version'],
+        extraEnv ? { env: { ...process.env, ...extraEnv } } : {});
+    if ((await probe()).code === 0) return null;
+    log('[preflight] 未检测到 cmake（koffi 编译必需），尝试 python3 -m pip install --user cmake …');
+    for (const extra of [['--break-system-packages'], []]) {
+        const r = await runCommand('python3', ['-m', 'pip', 'install', '--user', 'cmake', ...extra], {});
+        if (r.code === 0) break;
+        log(`[preflight] pip 安装 cmake 失败: ${(r.stderr || r.stdout || '').trim().slice(-200)}`);
+    }
+    const localEnv = { PATH: `${localBin}:${process.env.PATH ?? ''}` };
+    if ((await probe(localEnv)).code === 0) {
+        log('[preflight] cmake 已通过 pip --user 安装并注入本次安装的 PATH');
+        return localBin;
+    }
+    throw new Error('NAS 缺少 cmake（koffi 编译必需，自动安装失败）。请 SSH 执行: sudo apt-get update && sudo apt-get install -y cmake 后重试升级');
+}
+
 /* ------------------------------------------------------------------ *
  * 升级各阶段
  * ------------------------------------------------------------------ */
@@ -332,6 +362,9 @@ async function downloadIntoStaging(target, registryBase) {
     // 构建产物跨版本污染），保证无人值守可执行。
     writeFileSync(join(stagingDir, '.npmrc'), 'node-linker=hoisted\nside-effects-cache=false\n');
     const pnpm = pnpmCommand();
+    // koffi 需要 cmake 才能编译（fs-ext 走 node-gyp，工具链通常已随系统就绪）；
+    // 缺失时先尝试自动补齐，避免装完才发现缺产物再回滚一次。
+    const cmakePath = await ensureCmake();
     setState('downloading', `正在下载 ${PKG}@${target} …`);
     // pnpm 不认 npm 风格的 --omit/--no-audit/--no-fund（0.4.18 实测踩坑）：
     // 排除 dev 依赖用 --prod；--registry 让安装与版本查询走同一个源，
@@ -343,11 +376,20 @@ async function downloadIntoStaging(target, registryBase) {
         ...(registryBase ? ['--registry', registryBase] : []),
     ], {
         cwd: stagingDir,
-        env: { ...process.env, CI: 'true', npm_config_node_linker: 'hoisted' },
+        env: {
+            ...process.env,
+            CI: 'true',
+            npm_config_node_linker: 'hoisted',
+            ...(cmakePath ? { PATH: `${cmakePath}:${process.env.PATH ?? ''}` } : {}),
+        },
     });
     if (result.code !== 0) {
         throw new Error(`staging 安装失败(pnpm exit ${result.code}): ${result.stderr.slice(-400)}`);
     }
+    // pnpm 对失败的构建脚本仅告警不拦截（cnoke 缺 cmake 时就是这样静默失败的），
+    // 必须把输出尾部落盘，问题才可诊断。
+    if (result.stdout.trim()) log(`[pnpm] 输出尾部: ${result.stdout.trim().slice(-500).replace(/\s*\n+\s*/g, ' | ')}`);
+    if (result.stderr.trim()) log(`[pnpm] 告警尾部: ${result.stderr.trim().slice(-500).replace(/\s*\n+\s*/g, ' | ')}`);
     // 校验装到的确实是目标版本，防止镜像滞后悄悄装了旧版。
     const staged = JSON.parse(readFileSync(join(stagingDir, 'node_modules', PKG, 'package.json'), 'utf8')).version;
     if (staged !== target) throw new Error(`staging 版本不符：期望 ${target}，实际 ${staged}`);
