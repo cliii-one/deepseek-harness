@@ -12,7 +12,8 @@
  */
 import { spawn } from 'node:child_process';
 import net from 'node:net';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync
+, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { applyFnosPatches } from './fnos-patches.mjs';
@@ -317,10 +318,19 @@ async function downloadIntoStaging(target, registryBase) {
     // 版本，撞上"staged 必须严格等于 target"的校验而误报失败。
     writeFileSync(
         join(stagingDir, 'package.json'),
-        JSON.stringify({ name: 'dsh-selfupdate-staging', private: true, dependencies: { [PKG]: target } }, null, 2),
+        // pnpm.onlyBuiltDependencies 白名单放行原生包的 install 脚本：pnpm 10 默认
+        // 拦截构建脚本，koffi（cnoke 解压 vendor 预编译）和 fs-ext（node-gyp 编译）
+        // 不跑脚本就没有 native 产物，dsh 0.1.3-alpha.2 起依赖它们，boot 直接崩。
+        JSON.stringify({
+            name: 'dsh-selfupdate-staging',
+            private: true,
+            dependencies: { [PKG]: target },
+            pnpm: { onlyBuiltDependencies: ['koffi', 'fs-ext'] },
+        }, null, 2),
     );
-    // 实体文件布局 + 关闭交互确认，保证无人值守可执行。
-    writeFileSync(join(stagingDir, '.npmrc'), 'node-linker=hoisted\n');
+    // 实体文件布局 + 关闭交互确认 + 关闭 side-effects 缓存（防 store 里旧版本的
+    // 构建产物跨版本污染），保证无人值守可执行。
+    writeFileSync(join(stagingDir, '.npmrc'), 'node-linker=hoisted\nside-effects-cache=false\n');
     const pnpm = pnpmCommand();
     setState('downloading', `正在下载 ${PKG}@${target} …`);
     // pnpm 不认 npm 风格的 --omit/--no-audit/--no-fund（0.4.18 实测踩坑）：
@@ -341,6 +351,39 @@ async function downloadIntoStaging(target, registryBase) {
     // 校验装到的确实是目标版本，防止镜像滞后悄悄装了旧版。
     const staged = JSON.parse(readFileSync(join(stagingDir, 'node_modules', PKG, 'package.json'), 'utf8')).version;
     if (staged !== target) throw new Error(`staging 版本不符：期望 ${target}，实际 ${staged}`);
+    // 原生模块自检：0.1.3-alpha.2 起 dsh 依赖 koffi/fs-ext，缺 native 产物会让
+    // 宿主 boot 崩溃（0.4.25 实测踩坑），换装前在此拦截。
+    verifyNativeModules();
+}
+
+/**
+ * 校验 staging 内原生模块的构建产物是否齐全。
+ * - koffi：cnoke --prebuild 从 vendor 解压，产物在 build/koffi/ 下的 .node；
+ * - fs-ext：node-gyp 编译，产物在 build/Release/fs-ext.node（NAS 需编译工具链）。
+ * 任一缺失即抛错，终止本次升级（尚未换装，旧版原样运行，天然安全）。
+ */
+function verifyNativeModules() {
+    const problems = [];
+    if (!findFileByExt(join(stagingDir, 'node_modules', 'koffi', 'build'), '.node')) {
+        problems.push('koffi 缺少原生二进制（install 脚本未执行或 prebuild 解压失败）');
+    }
+    const fsExtDir = join(stagingDir, 'node_modules', 'fs-ext');
+    if (!existsSync(join(fsExtDir, 'fs-ext.js'))) {
+        problems.push('fs-ext 包文件不完整（缺少 fs-ext.js）');
+    } else if (!findFileByExt(join(fsExtDir, 'build'), '.node')) {
+        problems.push('fs-ext 缺少编译产物 build/Release/fs-ext.node（NAS 需要 python3/make/g++ 工具链）');
+    }
+    if (problems.length > 0) throw new Error(`原生模块校验失败：${problems.join('；')}`);
+}
+
+/** 递归查找目录下第一个指定扩展名的文件，目录不存在或未找到返回 null。 */
+function findFileByExt(dir, ext) {
+    try {
+        for (const entry of readdirSync(dir, { recursive: true })) {
+            if (entry.endsWith(ext)) return join(dir, entry);
+        }
+    } catch { /* 目录不存在 */ }
+    return null;
 }
 
 /**
