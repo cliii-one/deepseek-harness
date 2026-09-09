@@ -238,6 +238,44 @@ function compareSimpleSemver(a, b) {
 }
 
 /**
+ * 把 profile 清单里 bundled 插件的 file: 声明规范化为 npm 精确版本号。
+ *
+ * 为什么必须做：`dsh plugin add <tgz>` 会把清单声明写成 file:/…tgz 形态，
+ * 而插件市场 dshmarket 的更新检测对 file: 声明只在"匹配上市场目录条目"
+ * 时才提供在线更新入口 —— tgz 离线装的包没有 git 证据，匹配基本失败，
+ * 插件从此永远显示"已是最新"（线上发新版也提示不了更新）。与
+ * dsh-selfupdater 更新后的做法对齐：声明回写为精确 npm 版本号，
+ * 保证 registry 可解析、市场走普通 npm 检测分支。
+ *
+ * 幂等：只改以 file: 开头的声明，已是 npm 版本号的不动。
+ * 版本基准：node_modules 实际已装版本优先（在线升级后比种子新），
+ * 读不到回退种子版本。
+ */
+function normalizePluginManifestSpec(profileDir, pkgName, seedVer) {
+    if (!pkgName) return;
+    try {
+        const manifestPath = path.join(profileDir, 'package.json');
+        if (!fs.existsSync(manifestPath)) return;
+        const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+        const spec = manifest.dependencies?.[pkgName];
+        if (typeof spec !== 'string' || !spec.toLowerCase().startsWith('file:')) return;
+        // getInstalledPluginVersion 在 node_modules 读不到时会回退返回清单
+        // 声明本身 —— 恰是这里的 file: 字符串，不能当版本号写回，否则声明
+        // 原地打转。file: 形态一律视为"无已装版本"，改用种子版本兜底。
+        const installed = getInstalledPluginVersion(profileDir, pkgName);
+        const ver = installed && !String(installed).toLowerCase().startsWith('file:')
+            ? String(installed)
+            : seedVer;
+        if (!ver) return;
+        manifest.dependencies[pkgName] = ver;
+        fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n', 'utf-8');
+        console.log(`[Runner] 插件 ${pkgName}: 清单声明已从 file: 规范化为 npm 版本 ${ver}（恢复市场在线更新检测）`);
+    } catch (e) {
+        console.warn(`[Runner] 规范化插件 ${pkgName} 清单声明失败（不影响启动）:`, e.message);
+    }
+}
+
+/**
  * 首次启动把内置插件离线装入 DSH profile（同步执行，阻塞在 dsh 启动前）。
  * 升级场景：应用升级后种子里的 tgz 版本比 profile 已装版本新时自动重装。
  */
@@ -264,6 +302,9 @@ function installBundledPlugins() {
             // 跳过决策留痕：便于排查"插件版本被回退"类问题（回退到底发生在
             // runner 重装还是 pnpm 依赖重算，一看日志便知）。
             console.log(`[Runner] 插件 ${pkgName}: 已装 ${installedVer} >= 种子 ${seedVer}，跳过内置安装`);
+            // 存量用户的清单可能还是 file: 声明：即使跳过安装也要规范化，
+            // 否则插件市场的在线更新检测永远不生效（见 normalizePluginManifestSpec 注释）。
+            normalizePluginManifestSpec(profileDir, pkgName, seedVer);
             continue;
         }
         console.log(`[Runner] 正在内置安装插件: ${tgz}${installedVer ? `（当前 ${installedVer} -> 目标 ${seedVer ?? 'unknown'}）` : ''} -> profile "${DSH_PLUGIN_PROFILE}"...`);
@@ -276,6 +317,10 @@ function installBundledPlugins() {
         if (r.status !== 0) {
             console.warn(`[Runner] 插件 ${tgz} 内置安装失败（不影响启动，可稍后在插件市场手动安装）`);
             allOk = false;
+        } else {
+            // add 刚把声明写成 file:…tgz：立即规范化为 npm 版本号，
+            // 插件市场才能检测并执行在线更新（见 normalizePluginManifestSpec 注释）。
+            normalizePluginManifestSpec(profileDir, pkgName, seedVer);
         }
     }
 
