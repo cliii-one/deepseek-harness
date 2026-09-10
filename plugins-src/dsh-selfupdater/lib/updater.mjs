@@ -425,18 +425,25 @@ function koffiBinaryFound() {
  * 校验 staging 内原生模块的构建产物是否齐全。
  * - koffi：见 koffiBinaryFound（2.x/3.x 双结构兼容）；
  * - fs-ext：node-gyp 编译，产物在 build/Release/fs-ext.node（NAS 需编译工具链）。
- * 任一缺失即抛错，终止本次升级（尚未换装，旧版原样运行，天然安全）。
+ *
+ * 校验语义是"依赖树里有则必须完整"，而非"必须有"：上游会调整依赖
+ * （0.1.5-alpha.2 起移除了 fs-ext），无条件校验会对本就不存在的包误报，
+ * 把成功的升级拦下（0.4.29 实测踩坑）。任一缺失即抛错终止本次升级
+ * （尚未换装，旧版原样运行，天然安全）。
  */
 function verifyNativeModules() {
     const problems = [];
-    if (!koffiBinaryFound()) {
+    const nmDir = join(stagingDir, 'node_modules');
+    if (existsSync(join(nmDir, 'koffi')) && !koffiBinaryFound()) {
         problems.push('koffi 缺少原生二进制（install 脚本未执行或平台子包未装上）');
     }
-    const fsExtDir = join(stagingDir, 'node_modules', 'fs-ext');
-    if (!existsSync(join(fsExtDir, 'fs-ext.js'))) {
-        problems.push('fs-ext 包文件不完整（缺少 fs-ext.js）');
-    } else if (!findFileByExt(join(fsExtDir, 'build'), '.node')) {
-        problems.push('fs-ext 缺少编译产物 build/Release/fs-ext.node（NAS 需要 python3/make/g++ 工具链）');
+    const fsExtDir = join(nmDir, 'fs-ext');
+    if (existsSync(fsExtDir)) {
+        if (!existsSync(join(fsExtDir, 'fs-ext.js'))) {
+            problems.push('fs-ext 包文件不完整（缺少 fs-ext.js）');
+        } else if (!findFileByExt(join(fsExtDir, 'build'), '.node')) {
+            problems.push('fs-ext 缺少编译产物 build/Release/fs-ext.node（NAS 需要 python3/make/g++ 工具链）');
+        }
     }
     if (problems.length > 0) throw new Error(`原生模块校验失败：${problems.join('；')}`);
 }
