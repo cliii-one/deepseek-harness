@@ -10,7 +10,7 @@
  *   node updater.mjs --pid <DSH主进程PID> --app-dir <APP目录> \
  *        --workspace <工作区目录> --port <服务端口> [--pkg @deepseek-ai/dsh]
  */
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import net from 'node:net';
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync
 , rmSync, writeFileSync } from 'node:fs';
@@ -218,14 +218,45 @@ function runCommand(file, cmdArgs, opts = {}) {
     });
 }
 
-/** 定位随应用打包的 pnpm（构建时固定安装于 APP_DIR，见 build.sh 步骤 3）。 */
+/**
+ * 定位 staging 安装用的 pnpm。
+ *
+ * 为什么优先系统 PATH 而非自带 pnpm：DSH CLI 装卸插件是裸 spawnSync("pnpm")
+ * （无版本固定、无 store 参数），用的是系统 PATH 里的 pnpm。升级换装的
+ * node_modules 若由另一个 pnpm（如 FPK 自带的 10.x）安装，node_modules/
+ * .modules.yaml 记录的 store 就与 DSH CLI 推导的不一致，pnpm 11 起会以
+ * ERR_PNPM_UNEXPECTED_STORE 拒绝一切插件装卸（0.4.30 实测踩坑，即插件市场
+ * 报"node_modules 链接到的 store 和当前 pnpm 默认使用的不一致"）。
+ * 用与 DSH CLI 同源的 pnpm 安装，store 推导天然一致。
+ *
+ * @returns {{file: string, args: string[], pathPrefix: string|null}}
+ *   pathPrefix 为 install 子进程需要前置到 PATH 的目录（探测时多看的
+ *   常见 bin 目录，保证 spawn('pnpm') 能解析到同一个 pnpm；无需时为 null）。
+ */
 function pnpmCommand() {
-    // 首选直接用自带 node 运行 pnpm.cjs，避免依赖 PATH 与 shebang。
+    // 探测 PATH 里的 pnpm：前置常见 bin 目录（DSH 进程的 PATH 可能不含它们，
+    // 对齐 dshmarket extraPathDirs 的思路——npm 全局 bin、用户级安装位置）。
+    const localBin = join(process.env.HOME || homedir(), '.local', 'bin');
+    const probe = spawnSync('pnpm', ['--version'], {
+        env: { ...process.env, PATH: `${localBin}:${process.env.PATH ?? ''}` },
+        shell: process.platform === 'win32',
+        encoding: 'utf-8',
+        timeout: 15000,
+    });
+    if (probe.status === 0 && probe.stdout?.trim()) {
+        log(`[preflight] staging 使用系统 PATH 的 pnpm ${probe.stdout.trim().split(/\s+/).pop()}`
+            + '（与 DSH CLI 插件装卸同源，store 推导一致）');
+        return { file: 'pnpm', args: [], pathPrefix: localBin };
+    }
+    // 回退：随应用打包的 pnpm（构建时固定安装于 APP_DIR，见 build.sh 步骤 3）。
+    // 系统 PATH 没有 pnpm 时 DSH CLI 自己也会装不上插件，此时 store 的一致性
+    // 无从谈起，先保证升级本身可用。
+    log('[preflight] 系统 PATH 未探测到 pnpm，回退使用随应用打包的 pnpm');
     const cjs = join(appDir, 'lib', 'node_modules', 'pnpm', 'bin', 'pnpm.cjs');
-    if (existsSync(cjs)) return { file: process.execPath, args: [cjs] };
+    if (existsSync(cjs)) return { file: process.execPath, args: [cjs], pathPrefix: null };
     const bin = join(appDir, 'bin', 'pnpm');
-    if (existsSync(bin)) return { file: bin, args: [] };
-    throw new Error('找不到随应用打包的 pnpm，无法在 staging 安装新版');
+    if (existsSync(bin)) return { file: bin, args: [], pathPrefix: null };
+    throw new Error('系统 PATH 与应用目录都找不到 pnpm，无法在 staging 安装新版');
 }
 
 /**
@@ -369,6 +400,9 @@ async function downloadIntoStaging(target, registryBase) {
     // pnpm 不认 npm 风格的 --omit/--no-audit/--no-fund（0.4.18 实测踩坑）：
     // 排除 dev 依赖用 --prod；--registry 让安装与版本查询走同一个源，
     // 避免"官方源不通、镜像查到版本却装不下来"的割裂。
+    // PATH 前缀合成：pnpm 探测与 cmake 注入可能各自带目录，去重后统一前置，
+    // 保证 install 子进程能解析到与探测相同的 pnpm。
+    const pathPrefixes = [...new Set([pnpm.pathPrefix, cmakePath].filter(Boolean))];
     const result = await runCommand(pnpm.file, [
         ...pnpm.args,
         'install',
@@ -380,7 +414,9 @@ async function downloadIntoStaging(target, registryBase) {
             ...process.env,
             CI: 'true',
             npm_config_node_linker: 'hoisted',
-            ...(cmakePath ? { PATH: `${cmakePath}:${process.env.PATH ?? ''}` } : {}),
+            ...(pathPrefixes.length > 0
+                ? { PATH: `${pathPrefixes.join(':')}:${process.env.PATH ?? ''}` }
+                : {}),
         },
     });
     if (result.code !== 0) {
@@ -391,6 +427,14 @@ async function downloadIntoStaging(target, registryBase) {
     // 并行构建时会截掉关键包的输出（0.4.28 排查 koffi 时被截断坑了一把）。
     if (result.stdout.trim()) log(`[pnpm] 输出尾部: ${result.stdout.trim().slice(-3000).replace(/\s*\n+\s*/g, ' | ')}`);
     if (result.stderr.trim()) log(`[pnpm] 告警尾部: ${result.stderr.trim().slice(-3000).replace(/\s*\n+\s*/g, ' | ')}`);
+    // 诊断留痕：.modules.yaml 记录本次安装实际链接的 store。它与 DSH CLI
+    // （系统 PATH 的 pnpm）推导的 store 不一致时，插件装卸会被
+    // ERR_PNPM_UNEXPECTED_STORE 整体拒绝——留此日志一眼核对错位。
+    try {
+        const storeDir = /^storeDir:\s*(.+)$/m
+            .exec(readFileSync(join(stagingDir, 'node_modules', '.modules.yaml'), 'utf8'))?.[1];
+        if (storeDir) log(`[pnpm] staging node_modules 链接的 store: ${storeDir.trim()}`);
+    } catch { /* .modules.yaml 缺失或不可读：留痕失败不影响升级 */ }
     // 校验装到的确实是目标版本，防止镜像滞后悄悄装了旧版。
     const staged = JSON.parse(readFileSync(join(stagingDir, 'node_modules', PKG, 'package.json'), 'utf8')).version;
     if (staged !== target) throw new Error(`staging 版本不符：期望 ${target}，实际 ${staged}`);
