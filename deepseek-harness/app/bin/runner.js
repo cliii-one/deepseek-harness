@@ -276,6 +276,85 @@ function normalizePluginManifestSpec(profileDir, pkgName, seedVer) {
 }
 
 /**
+ * pnpm store 自愈：根治 ERR_PNPM_UNEXPECTED_STORE（市场更新/装卸插件被整体拒绝）。
+ *
+ * 病因：`dsh plugin` 只是把参数透传给 `spawnSync("pnpm")`，不带 --store-dir，
+ * store 完全由被调 pnpm 自己的配置解析决定（profile .npmrc →
+ * $XDG_CONFIG_HOME/pnpm/rc → pnpm 默认）。dsh 主服务以 HOME=工作区启动，
+ * 所以实际生效的是 `<工作区>/.config/pnpm/rc` 里的 store-dir；一旦它与各
+ * profile 下 node_modules/.modules.yaml 记录的 store 不一致（构建期遗留的
+ * /tmp 种子库、手工换过 store 等），pnpm 会拒绝一切安装与卸载，市场更新
+ * 连"回滚验证"都过不去。
+ *
+ * 做法：每次启动时比对两者；仅当 rc 缺失/错位、且 .modules.yaml 记录的 store
+ * 真实存在于磁盘时，才把 rc 钉到那个真实 store。多 profile 指向不同 store
+ * 的歧义情况只告警不动手。任何异常都不阻断启动。
+ */
+function healPnpmStoreConfig() {
+    try {
+        const configHome = process.env.XDG_CONFIG_HOME || path.join(WORKSPACE_DIR, '.config');
+        const rcPath = path.join(configHome, 'pnpm', 'rc');
+        // 收集各 profile 实际链接的 store（只认含 .modules.yaml 的 pnpm 工程根，
+        // profiles/ 下那个无 .modules.yaml 的共享提升目录会被自动跳过）。
+        const stores = new Map(); // storeDir -> [profileName]
+        const profilesRoot = path.join(WORKSPACE_DIR, '.dsh', 'profiles');
+        let entries = [];
+        try {
+            entries = fs.readdirSync(profilesRoot, { withFileTypes: true });
+        } catch (e) { return; }
+        for (const ent of entries) {
+            if (!ent.isDirectory()) continue;
+            const modulesYaml = path.join(profilesRoot, ent.name, 'node_modules', '.modules.yaml');
+            let content;
+            try {
+                content = fs.readFileSync(modulesYaml, 'utf-8');
+            } catch (e) { continue; }
+            const m = /^storeDir:\s*(.+?)\s*$/m.exec(content);
+            if (!m) continue;
+            const dir = m[1].trim();
+            if (!stores.has(dir)) stores.set(dir, []);
+            stores.get(dir).push(ent.name);
+        }
+        if (stores.size === 0) return; // 无已安装 profile：无从判定，不动手
+        // 读当前 rc 的 store-dir
+        let rcStore = null;
+        let rcContent = null;
+        try {
+            rcContent = fs.readFileSync(rcPath, 'utf-8');
+            const m = /^\s*store-dir\s*=\s*(.+?)\s*$/m.exec(rcContent);
+            if (m) rcStore = m[1].trim();
+        } catch (e) { /* rc 不存在：视为缺失 */ }
+        if (stores.size > 1) {
+            const detail = [...stores.entries()]
+                .map(([s, ps]) => `${s} <- ${ps.join(',')}`)
+                .join('；');
+            console.warn(`[Runner] pnpm store 自愈跳过：多个 profile 链接了不同 store（${detail}），请手工统一`);
+            return;
+        }
+        const [realStore] = [...stores.keys()];
+        if (rcStore === realStore) return; // 一致：无事可做
+        // 只有记录的 store 真实存在才钉 rc，否则可能是用户有意迁移，不替用户做主
+        if (!fs.existsSync(realStore)) {
+            console.warn(`[Runner] pnpm store 疑似错位（rc=${rcStore || '未设置'}，profile 链接=${realStore}），但记录的 store 在磁盘上不存在，不自动改写；请检查 profile 后手工处理`);
+            return;
+        }
+        let next;
+        if (rcContent === null) {
+            next = `store-dir=${realStore}\n`;
+        } else if (/^\s*store-dir\s*=.*$/m.test(rcContent)) {
+            next = rcContent.replace(/^\s*store-dir\s*=.*$/m, `store-dir=${realStore}`);
+        } else {
+            next = rcContent.replace(/\s*$/, '') + `\nstore-dir=${realStore}\n`;
+        }
+        fs.mkdirSync(path.dirname(rcPath), { recursive: true });
+        fs.writeFileSync(rcPath, next, 'utf-8');
+        console.log(`[Runner] pnpm store 已自愈：${rcPath} 的 store-dir 由 ${rcStore || '未设置'} 纠正为 ${realStore}（与 profile node_modules 链接一致）`);
+    } catch (e) {
+        console.warn('[Runner] pnpm store 自愈失败（不影响启动）:', e.message);
+    }
+}
+
+/**
  * 首次启动把内置插件离线装入 DSH profile（同步执行，阻塞在 dsh 启动前）。
  * 升级场景：应用升级后种子里的 tgz 版本比 profile 已装版本新时自动重装。
  */
@@ -334,7 +413,10 @@ function installBundledPlugins() {
 }
 
 // 内置插件安装属于"锦上添花"：任何异常都不能阻断 dsh 主服务启动
+// 注意顺序：先自愈 pnpm store 配置，再做种子安装 —— dsh plugin 是裸调 pnpm，
+// store 错位时后面所有 add 都会被 ERR_PNPM_UNEXPECTED_STORE 拒绝。
 try {
+    healPnpmStoreConfig();
     syncPluginSeeds();
     installBundledPlugins();
 } catch (e) {
