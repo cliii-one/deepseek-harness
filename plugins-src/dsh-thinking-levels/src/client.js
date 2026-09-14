@@ -6,7 +6,7 @@
 // 修改须两处同步。
 
 window.__ModuleLoader__.load({
-  id: 'dsh-thinking-levels',
+  id: '@cliii-one/dsh-thinking-levels',
   factory(require) {
     const React = require('react')
     const { useState, useEffect, useCallback } = React

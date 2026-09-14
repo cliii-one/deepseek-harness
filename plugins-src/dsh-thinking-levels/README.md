@@ -1,6 +1,8 @@
-# dsh-thinking-levels
+# @cliii-one/dsh-thinking-levels
 
 DeepSeek Harness 模型思考等级设置插件:编辑 `llm-pi-ai` 管理的第三方模型的 `reasoningEfforts`(7 个标准思考档位与每档线上值),经官方 settings RPC 整组写回 settings.yaml。
+
+> 注意:npm 上存在同名包 `dsh-thinking-levels`(drscrewdriver 维护,功能不同)。本包为 scoped 名 `@cliii-one/dsh-thinking-levels`,两者无关联。
 
 参考 `@mzzsfy/dsh-model-capability-editor` 的架构(客户端自注册 + settings RPC + 整组合并写回 + 冲突重放),聚焦"思考等级"单一生效面,零第三方依赖。
 
@@ -31,16 +33,13 @@ DeepSeek Harness 模型思考等级设置插件:编辑 `llm-pi-ai` 管理的第�
 - 差异:本插件**只编辑 `reasoningEfforts`**(不做 `input` 多模态声明),**不做官方模型行行内注入**(无 MutationObserver 行锚点扫描),仅提供浮动面板;**零外部依赖**(无 toast 依赖,反馈走 console)。
 - 与其互斥字段集不重叠,可共存;但两者都写 `providers.<route>.models` 数组,同时打开编辑时后保存者以最新基线合并,不丢对方字段。
 
-## 安装(本地插件,经 FPK 打包)
-
-本插件位于仓库 `plugins-src/dsh-thinking-levels/`,构建时以 `@local/dsh-thinking-levels` 形式列进 `scripts/meta.env` 的 `BUNDLED_DSH_PLUGINS` 即随 FPK 离线种子打包:
+## 安装(经 npm,由 GitHub Actions 自动发布)
 
 ```sh
-# scripts/meta.env
-BUNDLED_DSH_PLUGINS=dshmarket dsh-selfupdater @local/dsh-thinking-levels
+dsh plugin --profile web add @cliii-one/dsh-thinking-levels
 ```
 
-重启 DeepSeek Harness 后,runner.js 首次启动自动装入 web profile。
+重启 DeepSeek Harness 后生效。发版流程:改 `package.json` 的 `version` + push 到 main,工作流跑单测通过后自动 `npm publish`(需仓库配置 `NPM_TOKEN` secret;scoped 包首次发布无需额外参数,工作流已带 `--access public`)。
 
 ## 开发
 

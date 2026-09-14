@@ -5,7 +5,7 @@
 #    配合"发版 = 改 package.json 版本号 + push"的极简流程。
 # 2. 手动触发（workflow_dispatch），可在 Actions 页面直接执行。
 #
-# 幂等性：发布前用 `npm view dsh-thinking-levels version` 对比本地版本号，
+# 幂等性：发布前用 `npm view @cliii-one/dsh-thinking-levels version` 对比本地版本号，
 # 若 npm 上已是同版本则跳过发布（exit 0），避免重复推送导致工作流红叉。
 
 name: Publish dsh-thinking-levels
@@ -60,7 +60,7 @@ jobs:
           echo "本地版本: ${LOCAL_VERSION}"
 
           # 远端不存在该包（首次发布）时 npm view 会非零退出，视为需要发布
-          REMOTE_VERSION=$(npm view dsh-thinking-levels version 2>/dev/null || echo "none")
+          REMOTE_VERSION=$(npm view @cliii-one/dsh-thinking-levels version 2>/dev/null || echo "none")
           echo "npm 远端版本: ${REMOTE_VERSION}"
 
           if [ "$LOCAL_VERSION" = "$REMOTE_VERSION" ]; then

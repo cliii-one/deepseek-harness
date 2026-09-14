@@ -4,4 +4,4 @@
 
 - insert:
     - id: thinking-levels
-      name: dsh-thinking-levels
+      name: '@cliii-one/dsh-thinking-levels'
