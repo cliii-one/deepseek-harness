@@ -1,0 +1,33 @@
+{
+  "name": "dsh-thinking-levels",
+  "description": "模型思考等级设置插件:在官方模型页浮动面板编辑 llm-pi-ai 模型的 reasoningEfforts 七档思考档位与线上拼写,经官方 settings RPC 整组写回,冲突重读后重放一次",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./src/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\""
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "src",
+    "test",
+    "cordis.patch.yml",
+    "README.md"
+  ]
+}

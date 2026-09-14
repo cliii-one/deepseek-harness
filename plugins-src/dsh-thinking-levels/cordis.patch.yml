@@ -1,0 +1,7 @@
+# dsh-thinking-levels bundle patch: 把插件行插进 profile 根,
+# 由 `dsh plugin add` 应用。行本身只是把包收进 profile,让 client
+# 模块系统装配 src/client.js;宿主半区是空实现,行为全在客户端。
+
+- insert:
+    - id: thinking-levels
+      name: dsh-thinking-levels
