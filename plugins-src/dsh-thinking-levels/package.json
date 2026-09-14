@@ -21,6 +21,11 @@
     "test": "node --test \"test/*.test.mjs\""
   },
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cliii-one/deepseek-harness.git",
+    "directory": "plugins-src/dsh-thinking-levels"
+  },
   "engines": {
     "node": ">=22"
   },
