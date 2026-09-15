@@ -1,7 +1,7 @@
 // 模型思考等级 Client 半区:官方模型页注入浮动入口,点开即完整编辑面板。
 // 以 DSH client-modules 自注册格式发布:__ModuleLoader__.load({id, factory})。
-// 纯客户端零 host 端:读写经 remote.settings 服务的 describe/mutate RPC,
-// 信封由 makeSettingsFace 适配为插件内部 RPC 面。
+// 纯客户端零 host 端:读写经 settings RPC(typed remote 面 / connection.api
+// 面按宿主代际二选一,信封由 makeSettingsFace 适配为插件内部 RPC 面),
 // 判定逻辑与 src/logic.mjs 为同一份(单文件自包含格式无法跨文件 require),
 // 修改须两处同步。
 
@@ -98,6 +98,12 @@ window.__ModuleLoader__.load({
       return { models, droppedDraftIds }
     }
 
+    // settings 传输 → 插件内部 settings 面(describe() / mutate(ns, ops, revision))。
+    // 两种宿主传输形态(照参考包 0.6.0 地面真相):
+    // - typed remote 面(dsh 0.1.2+):方法直返 RemoteResult 信封 {ok,value|error};
+    // - connection.api 面(dsh 0.1.1):settings.describe() 无参,
+    //   settings.mutate({ns,ops,...}) 单对象参数,返回 {rpcId,result:{ok,value|error}} 信封。
+    // 面缺失或形状不完整返回 null,由调用方降级呈现只读原因。
     function unwrapEnvelope(envelope) {
       if (envelope !== null && typeof envelope === 'object' && envelope.ok === true) return envelope.value
       if (envelope !== null && typeof envelope === 'object' &&
@@ -254,6 +260,16 @@ window.__ModuleLoader__.load({
       return title === '模型' || title === 'Models'
     }
     /* LOGIC-END */
+
+    // ---------- 宿主代际判据(照参考包 0.6.0 地面真相) ----------
+    // 0.1.2+ 的 boot wire 带 batches 批次调度字段(宿主 parseBootManifest 将其
+    // 校验为必填数组);0.1.1 的 wire 无此字段。判据决定 inject 声明形态:
+    // - 0.1.2+:点分声明 remote.settings,交 cordis 门控(fiber 等 namespace
+    //   $mount 完成才激活,激活即就绪;不声明则点分读取永远抛错);
+    // - 0.1.1:声明两代都具备的基座服务(remote + connection),settings 传输
+    //   在 apply 内轮询 connection.api 定面。若在 0.1.1 上点分声明,会因
+    //   boot wire 无该 namespace 而永远 pending,拖垮整页 web boot。
+    const hasBatchesWire = typeof window !== 'undefined' && window.__DSH_BOOT__?.batches !== undefined
 
     // ---------- UI ----------
 
@@ -526,8 +542,10 @@ window.__ModuleLoader__.load({
     }
 
     return {
-      // 声明两代宿主都具备的基座服务;settings 传输在 apply 内异步定面轮询
-      inject: ['remote', 'connection'],
+      // inject 按宿主代际二选一(判据 hasBatchesWire 见上):0.1.2+ 以点分
+      // 声明交由 cordis 门控;0.1.1 声明两代都具备的基座服务,settings 传输
+      // 在 apply 内异步定面轮询。
+      inject: hasBatchesWire ? ['remote', 'remote.settings'] : ['remote', 'connection'],
       apply(ctx) {
         let settings = null
         // 面板挂载点与 React root
@@ -536,8 +554,17 @@ window.__ModuleLoader__.load({
         let scanTimer = null
         let scanPending = false
 
+        // settings 面按代际取形:0.1.2+ 点分声明下 fiber 等挂载完成才激活,
+        // apply 时已就绪,直接取形;0.1.1 无 typed 面,轮询从 api 相位起——
+        // connection.api 面是 0.1.1 唯一 settings RPC 通道。两代路径对读取
+        // 抛错/面缺失均收敛为恒定只读降级:定面完成前 settings 为 null,
+        // reconcile 早退。
         const FACE_POLL_INTERVAL_MS = 50
+        // 等待窗:各代宿主上面在首拍即定型,窗口只是防御性上界,非真实时延
         const API_FACE_WAIT_MS = 1000
+        const FACE_UNAVAILABLE_WARN = '[dsh-thinking-levels] settings RPC 面不可用,编辑功能禁用'
+        // 0.1.1 轮询:读取抛错(cordis get trap)与面缺失同义;窗口判定前置,
+        // 任何路径都不绕过终止性——满窗即恒定禁用,不再重排
         const faceStartedAt = Date.now()
         const facePoll = () => {
           if (disposed) return
@@ -549,19 +576,37 @@ window.__ModuleLoader__.load({
             // namespace/服务读取未就绪:按轮询节拍重试
           }
           if (expired) {
-            console.warn('[dsh-thinking-levels] settings RPC 面不可用,编辑功能禁用')
+            console.warn(FACE_UNAVAILABLE_WARN)
             return
           }
           setTimeout(facePoll, FACE_POLL_INTERVAL_MS)
         }
-        facePoll()
+        if (hasBatchesWire) {
+          try {
+            settings = makeSettingsFace(ctx.remote !== undefined ? ctx.remote.settings : undefined)
+          } catch (error) {
+            // 一次性终态判定,失败原因随告警留痕
+            console.warn(FACE_UNAVAILABLE_WARN, error)
+            settings = null
+          }
+          if (settings === null) console.warn(FACE_UNAVAILABLE_WARN)
+          else scheduleScan()
+        } else {
+          facePoll()
+        }
 
         function docInfo() {
           const outlet = document.querySelector('[data-slot="settings.section"]')
           if (outlet === null) return null
-          const heading = outlet.querySelector('h2')
-          const title = heading !== null ? heading.textContent : null
-          return { outlet, titleMatched: isModelsTitle(title) }
+          // 标题探测不假设具体标签:官方设置区标题曾用 h2,后续版本可能换语义
+          // 标签;遍历 outle 直接子级的 1~3 级标题做精确匹配,兼顾两种形态。
+          let titleMatched = false
+          for (const heading of outlet.querySelectorAll('h1, h2, h3')) {
+            if (isModelsTitle((heading.textContent || '').trim())) { titleMatched = true; break }
+          }
+          // 标题缺失(如折叠态)不判负:只要命名空间可读,面板内 provider 下拉
+          // 与模型行自证;标题匹配仅用于"在非模型设置页隐藏面板"的收窄。
+          return { outlet, titleMatched }
         }
 
         // 样式表只注入一份,挂 document.head;清理时随插件生命周期移除
@@ -583,13 +628,15 @@ window.__ModuleLoader__.load({
 
         function ensurePanel() {
           if (panel !== null) return
+          // 挂载点探测:优先设置对话框;部分宿主版本设置区是路由页/抽屉而非
+          // dialog 结构,fixed 定位的浮动面板挂在 body 一样成立,不能因此放弃。
           const dialog = [...document.querySelectorAll('[role="dialog"]')]
             .find((node) => node.querySelector('[data-slot="settings.section"]') !== null)
-          if (dialog === undefined) return
+          const mount = dialog !== undefined ? dialog : document.body
           ensureStyle()
           const container = document.createElement('div')
           container.className = 'tl-root'
-          dialog.appendChild(container)
+          mount.appendChild(container)
           const root = createRoot(container)
           root.render(React.createElement(ThinkingPanel, { settings }))
           panel = { container, root }
@@ -600,7 +647,11 @@ window.__ModuleLoader__.load({
           // 已脱离文档的挂载点:官方页卸载或重建了对话框,释放对应 root
           if (panel !== null && !panel.container.isConnected) disposePanel()
           const info = docInfo()
-          if (info === null || !info.titleMatched) { disposePanel(); return }
+          if (info === null) { disposePanel(); return }
+          // 标题未匹配(其他设置分区)时收起面板,仅在模型页展示;
+          // titleMatched 为 false 且面板未挂时不挂,避免全设置页常驻
+          if (!info.titleMatched && panel === null) return
+          if (!info.titleMatched) { disposePanel(); return }
           ensurePanel()
         }
 
