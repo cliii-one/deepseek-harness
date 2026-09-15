@@ -301,11 +301,21 @@ window.__ModuleLoader__.load({
       '.tl-select { background:transparent; color:inherit; border:1px solid var(--dsw-alias-separator-primary, rgba(128,128,128,0.35));',
       '  border-radius:6px; padding:2px 6px; font-size:12px; font-family:inherit; }',
       '.tl-text { background:transparent; color:inherit; border:1px solid var(--dsw-alias-separator-primary, rgba(128,128,128,0.35));',
-      '  border-radius:6px; padding:2px 6px; font-size:12px; font-family:inherit; width:90px; }',
+      '  border-radius:6px; padding:2px 6px; font-size:12px; font-family:inherit; flex:1; min-width:80px; }',
       '.tl-model { display:flex; flex-direction:column; gap:4px; }',
       '.tl-model__head { font-weight:600; }',
       '.tl-row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }',
       '.tl-check { display:inline-flex; align-items:center; gap:3px; font-size:12px; }',
+      // 紧凑档位列表:开关列 + 档位名列 + 线上拼写列,三列纵向对齐,7 行一屏看完
+      '.tl-levels { display:flex; flex-direction:column; gap:3px; }',
+      '.tl-level { display:flex; align-items:center; gap:8px; }',
+      '.tl-level__pick { display:inline-flex; align-items:center; gap:6px; cursor:pointer; flex:none; }',
+      '.tl-level__sw { width:34px; flex:none; }',
+      '.tl-level__name { width:58px; flex:none; font-size:12px; font-family:var(--ds-font-family-code, ui-monospace, SFMono-Regular, monospace); }',
+      '.tl-level--unchecked .tl-level__name { opacity:0.55; }',
+      '.tl-levels__head { color:var(--dsw-alias-label-secondary); font-size:11px; }',
+      '.tl-levels__head .tl-level__name { font-family:inherit; opacity:1; }',
+      '.tl-level__cap { flex:1; min-width:0; }',
       '.tl-switch input[type="checkbox"] { position:absolute; opacity:0; width:0; height:0; }',
       '.tl-switch { display:inline-flex; align-items:center; cursor:pointer; }',
       '.tl-switch__track { position:relative; width:34px; height:19px; border-radius:999px; box-sizing:border-box; flex:none;',
@@ -350,6 +360,9 @@ window.__ModuleLoader__.load({
       ]
     }
 
+    // 紧凑档位列表:开关列 + 档位名列 + 线上拼写列,7 行纵向对齐一屏看完。
+    // 拼写输入框是为上游中转的真实参数(不同厂商叫法不同),非 off 档宿主
+    // 硬校验必须有值:留空 = 自动填档位名自映射;仅 off 允许留空(=不发参数)。
     function LevelEditor(props) {
       const draft = props.draft
       const disabled = props.disabled === true
@@ -362,19 +375,31 @@ window.__ModuleLoader__.load({
       const spell = (level, value) => {
         props.onChange({ ...draft, spellings: { ...draft.spellings, [level]: value } })
       }
-      return h('div', { className: 'tl-row' },
-        EFFORT_LEVELS.map((level) => h('label', { className: 'tl-check tl-switch', key: level },
-          ...switchToggle({ disabled, checked: draft.checked[level] === true, onChange: () => toggle(level) }),
-          level,
-          h('input', {
-            className: 'tl-text',
-            disabled: disabled || draft.checked[level] !== true,
-            value: draft.spellings[level] || '',
-            placeholder: level === OFF_LEVEL ? '留空=不发送' : level,
-            title: '发往网关的线上值',
-            onChange: (event) => spell(level, event.target.value),
-          }),
-        )),
+      return h('div', { className: 'tl-levels' },
+        h('div', { className: 'tl-level tl-levels__head' },
+          h('span', { className: 'tl-level__sw' }),
+          h('span', { className: 'tl-level__name' }, '档位'),
+          h('span', { className: 'tl-level__cap' }, '线上拼写(留空=档位名,off 留空=不发送)'),
+        ),
+        EFFORT_LEVELS.map((level) => {
+          const on = draft.checked[level] === true
+          return h('div', { className: 'tl-level' + (on ? '' : ' tl-level--unchecked'), key: level },
+            h('label', { className: 'tl-level__pick' },
+              h('span', { className: 'tl-level__sw tl-switch' },
+                ...switchToggle({ disabled, checked: on, onChange: () => toggle(level) }),
+              ),
+              h('span', { className: 'tl-level__name' }, level),
+            ),
+            h('input', {
+              className: 'tl-text tl-level__cap',
+              disabled: disabled || !on,
+              value: draft.spellings[level] || '',
+              placeholder: level === OFF_LEVEL ? '留空=不发送' : level,
+              title: '发往上游的真实参数值,留空自动填档位名',
+              onChange: (event) => spell(level, event.target.value),
+            }),
+          )
+        }),
       )
     }
 
@@ -385,10 +410,7 @@ window.__ModuleLoader__.load({
       const changeDraft = (next) => props.onChange(model.id, next)
       return h('div', { className: 'tl-model' },
         h('div', { className: 'tl-model__head' }, model.id, model.name && model.name !== model.id ? ' (' + model.name + ')' : ''),
-        h('div', { className: 'tl-row' },
-          h('span', { className: 'tl-label' }, '思考等级(勾选 = 提供,输入 = 线上拼写,留空 = 档位名):'),
-          h(LevelEditor, { draft, disabled, onChange: changeDraft }),
-        ),
+        h(LevelEditor, { draft, disabled, onChange: changeDraft }),
       )
     }
     const MemoModelRow = React.memo(ModelRow)
@@ -475,7 +497,7 @@ window.__ModuleLoader__.load({
       const editDraft = (part) => patch({ draft: { ...draft, ...part } })
       return h('div', { className: 'tl-inline' },
         h('div', { className: 'tl-inline__title' }, '思考等级',
-          h('span', { className: 'tl-inline__hint' }, '勾选 = 提供该档;输入 = 线上拼写;留空 = 档位名')),
+          h('span', { className: 'tl-inline__hint' }, '开关=提供该档;右列=发给上游的真实参数')),
         h(LevelEditor, { draft, disabled: saving, onChange: editDraft }),
         h('div', { className: 'tl-inline__foot' },
           h('button', { className: 'tl-btn tl-btn--primary', disabled: saving, onClick: apply }, saving ? '保存中…' : '保存'),
