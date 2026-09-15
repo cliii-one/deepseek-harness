@@ -1,7 +1,7 @@
 {
   "name": "@cliii-one/dsh-thinking-levels",
   "description": "模型思考等级设置插件:在官方模型页浮动面板编辑 llm-pi-ai 模型的 reasoningEfforts 七档思考档位与线上拼写,经官方 settings RPC 整组写回,冲突重读后重放一次",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "main": "src/index.js",
   "exports": {

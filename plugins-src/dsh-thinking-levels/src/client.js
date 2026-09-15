@@ -727,31 +727,54 @@ window.__ModuleLoader__.load({
           for (const heading of outlet.querySelectorAll('h1, h2, h3')) {
             if (isModelsTitle((heading.textContent || '').trim())) { titleMatched = true; break }
           }
-          const details = outlet.querySelector('details')
-          // 行内锚点:官方模型行的「模型 ID」输入框(展开编辑器后出现)
+          const details = outlet.querySelector('details, .editor')
+          // 行内锚点:官方模型行的「模型 ID」输入框(aria-label 带 index 后缀:
+          // 官方写法 `${t("modelId")} ${index+1}`,前缀匹配兼容 zh/en 两语)
           const idInputs = titleMatched
             ? [...outlet.querySelectorAll('input[aria-label^="模型 ID"], input[aria-label^="Model ID"]')]
             : []
           return { outlet, titleMatched, hasEditor: details !== null, idInputs }
         }
 
-        // 行内注入:把 RowEditor 卡挂进官方模型行(「模型 ID」输入框的 entry 容器)。
-        // 结构假设(照参考包):idInput → div(模型行) → parentElement(entry 容器),
-        // 编辑器 details 的上一个兄弟节点文本 = provider route。
+        // 行内注入:把 RowEditor 卡挂进官方模型行(modelEntry 卡片尾部)。
+        // 官方结构(源码 dsh-client-ui-settings-models):
+        //   li.rowCard[key=provider] > div.editor > (editorHeader{editorTitle,editorRoute}
+        //   + section.modelCatalog > div.modelEntry > div.modelRow > input[aria-label="模型 ID n"])
+        // —— 每个 provider 卡内部各有一份 modelCatalog,卡内各行共享同一 route。
         function entryOf(idInput) {
+          const entry = idInput.closest('.modelEntry')
+          if (entry !== null) return entry
+          // 结构漂移兜底:沿官方旧版 div 嵌套上溯(参考包 0.6.0 同款)
           const modelRow = idInput.closest('div')
           return modelRow !== null ? modelRow.parentElement : null
+        }
+
+        // route 解析:从模型行向上找 provider 编辑器(.editor),其 editorRoute
+        // span 承载 route id(editorTitle 是 displayName,两者仅在 displayName ≠
+        // route 时并存;displayName === route 时 editorRoute 不渲染,回落
+        // editorTitle)。找不到 .editor 时按参考包旧结构 details 前兄弟取文本。
+        function routeOf(idInput) {
+          const editor = idInput.closest('.editor')
+          if (editor !== null) {
+            const routeSpan = editor.querySelector('.editorRoute')
+            if (routeSpan !== null && routeSpan.textContent.length > 0) return routeSpan.textContent.trim()
+            const titleSpan = editor.querySelector('.editorTitle')
+            if (titleSpan !== null && titleSpan.textContent.length > 0) return titleSpan.textContent.trim()
+            return null
+          }
+          const details = idInput.closest('details')
+          const legacyEditor = details !== null ? details.parentElement : null
+          return legacyEditor !== null && legacyEditor.firstElementChild !== null
+            ? legacyEditor.firstElementChild.textContent
+            : null
         }
 
         function mountRow(face, idInput) {
           const entry = entryOf(idInput)
           if (entry === null || entry.querySelector(':scope > .tl-inline-root') !== null) return false
-          const details = idInput.closest('details')
-          const editor = details !== null ? details.parentElement : null
-          if (editor === null) return false
-          const route = editor.firstElementChild !== null ? editor.firstElementChild.textContent : null
+          const route = routeOf(idInput)
           const modelId = idInput.value
-          if (route === null || modelId.length === 0) return false
+          if (route === null || route.length === 0 || modelId.length === 0) return false
           // 只挂 llm-pi-ai 管理的模型:route/modelId 双重核对,防误挂他源行
           if (!piAiRoutes.has(route) || !piAiModelIds.has(modelId)) return false
           const container = document.createElement('div')
