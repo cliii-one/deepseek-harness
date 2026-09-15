@@ -259,6 +259,20 @@ window.__ModuleLoader__.load({
     function isModelsTitle(title) {
       return title === '模型' || title === 'Models'
     }
+
+    // 行内应用的目标模型解析:官方行内 ID 输入若已改为基线中存在的新 id(改名
+    // 已落盘,原 id 已从基线消失),以新 id 为准;原 id 仍在基线视为撞名,回落原 id。
+    function resolveTargetId(liveId, originalId, baselineIds) {
+      const ids = baselineIds instanceof Set ? baselineIds : new Set(baselineIds)
+      const renamed = typeof liveId === 'string' && liveId.length > 0 && ids.has(liveId) && !ids.has(originalId)
+      return renamed ? liveId : originalId
+    }
+
+    // 锚点破坏判定:模型页已打开且官方编辑器已展开,却找不到任何「模型 ID」输入,
+    // 说明官方 DOM 结构已变,行内注入失效,应回退独立面板。
+    function anchorsBroken({ titleMatched, hasEditor, modelIdInputCount }) {
+      return titleMatched === true && hasEditor === true && modelIdInputCount === 0
+    }
     /* LOGIC-END */
 
     // ---------- 宿主代际判据(照参考包 0.6.0 地面真相) ----------
@@ -309,6 +323,12 @@ window.__ModuleLoader__.load({
       '  border:1px solid var(--dsw-alias-separator-primary, rgba(128,128,128,0.35)); }',
       '.tl-notice--error { color:var(--dsw-alias-state-error-primary, #d43a3a); }',
       '.tl-spacer { flex:1; }',
+      // 行内注入卡:挂在官方模型行(div 结构)的 entry 容器尾部,宽度随行自适应
+      '.tl-inline { margin-top:12px; padding:10px 12px; border:1px solid var(--dsw-alias-separator-primary, rgba(128,128,128,0.35));',
+      '  border-radius:10px; font-size:12px; }',
+      '.tl-inline__title { font-weight:600; margin-bottom:6px; }',
+      '.tl-inline__hint { color:var(--dsw-alias-label-secondary); font-weight:400; margin-left:6px; }',
+      '.tl-inline__foot { margin-top:8px; display:flex; align-items:center; gap:8px; }',
       '.tl-panel { position:fixed; right:16px; top:50%; transform:translateY(-50%); z-index:60;',
       '  width:560px; max-width:calc(100vw - 32px); max-height:80vh; overflow:auto;',
       '  background:var(--dsw-alias-bg-primary, #fff);',
@@ -373,7 +393,98 @@ window.__ModuleLoader__.load({
     }
     const MemoModelRow = React.memo(ModelRow)
 
-    function ThinkingPanel(props) {
+    // 行内编辑卡:挂在官方模型行展开区内,只编辑这一个模型的思考档位。
+    // 结构与 ThinkingPanel(回退形态)同源:读 describe → 草稿 → 保存流。
+    function RowEditor(props) {
+      const settings = props.settings
+      const route = props.route
+      const modelId = props.modelId
+      // 存活标记标准写法:setup 置 true、cleanup 置 false,StrictMode 双挂载后仍为 true
+      const aliveRef = React.useRef(false)
+      const [state, setState] = useState({ phase: 'loading', draft: null, notice: null })
+      const [saving, setSaving] = useState(false)
+      useEffect(() => {
+        aliveRef.current = true
+        return () => { aliveRef.current = false }
+      }, [])
+
+      function patch(part) { setState((prev) => ({ ...prev, ...part })) }
+
+      useEffect(() => {
+        let alive = true
+        void (async () => {
+          try {
+            if (!settings || typeof settings.describe !== 'function') {
+              patch({ phase: 'error', notice: 'remote.settings 服务面缺失,无法读写模型声明' })
+              return
+            }
+            const value = await settings.describe()
+            const ns = findNsEntry(value)
+            if (!alive) return
+            // 命名空间缺失或模型不在声明内:行内卡静默隐藏(官方行自有展示)
+            if (ns === undefined) { patch({ phase: 'hidden' }); return }
+            const model = modelsOf(ns.value, route).find((entry) => String(entry.id) === String(modelId))
+            if (model === undefined) { patch({ phase: 'hidden' }); return }
+            patch({ phase: 'ready', draft: draftsFromModels([model]).get(String(modelId)) })
+          } catch (error) {
+            if (alive) patch({ phase: 'error', notice: error && error.message ? error.message : String(error) })
+          }
+        })()
+        return () => { alive = false }
+      }, [])
+
+      async function apply() {
+        setSaving(true)
+        try {
+          // 官方行内 ID 输入是活动状态:改名已落盘则以新 ID 为目标,否则回落原 ID
+          const el = props.idInputEl
+          const liveId = el && el.isConnected ? el.value : modelId
+          const first = await settings.describe()
+          const nsFirst = findNsEntry(first)
+          const baselineIds = new Set(nsFirst !== undefined
+            ? modelsOf(nsFirst.value, route).map((entry) => String(entry.id))
+            : [])
+          const targetId = resolveTargetId(liveId, modelId, baselineIds)
+          await saveModels(settings, route, new Map([[targetId, state.draft]]))
+          // 保存后重读重建草稿,基线新鲜,保留他方词汇表外档位
+          const second = await settings.describe()
+          const nsSecond = findNsEntry(second)
+          const latest = nsSecond !== undefined
+            ? modelsOf(nsSecond.value, route).find((entry) => String(entry.id) === String(targetId))
+            : undefined
+          if (aliveRef.current) {
+            if (latest === undefined) { patch({ phase: 'hidden' }); return }
+            patch({ phase: 'ready', draft: draftsFromModels([latest]).get(String(targetId)) })
+            notify('已保存并写回 settings.yaml:' + targetId, 'ok')
+          }
+        } catch (error) {
+          if (aliveRef.current) notify(error && error.message ? error.message : String(error), 'error')
+        } finally {
+          if (aliveRef.current) setSaving(false)
+        }
+      }
+
+      if (state.phase === 'loading') {
+        return h('div', { className: 'tl-inline' }, h('span', { className: 'tl-label' }, '正在读取模型声明…'))
+      }
+      if (state.phase === 'error') {
+        return h('div', { className: 'tl-inline' }, h('span', { className: 'tl-notice tl-notice--error' }, state.notice))
+      }
+      if (state.phase === 'hidden') return null
+      const draft = state.draft
+      const editDraft = (part) => patch({ draft: { ...draft, ...part } })
+      return h('div', { className: 'tl-inline' },
+        h('div', { className: 'tl-inline__title' }, '思考等级',
+          h('span', { className: 'tl-inline__hint' }, '勾选 = 提供该档;输入 = 线上拼写;留空 = 档位名')),
+        h(LevelEditor, { draft, disabled: saving, onChange: editDraft }),
+        h('div', { className: 'tl-inline__foot' },
+          h('button', { className: 'tl-btn tl-btn--primary', disabled: saving, onClick: apply }, saving ? '保存中…' : '保存'),
+          h('span', { className: 'tl-label' }, '仅写回本模型,同 provider 其他模型不受影响。'),
+        ),
+      )
+    }
+
+    function FallbackPanel(props) {
       const [state, setState] = useState({ phase: 'loading', reason: null, providers: null, route: null, models: null, drafts: null })
       const [saving, setSaving] = useState(false)
       const [open, setOpen] = useState(false)
@@ -548,11 +659,23 @@ window.__ModuleLoader__.load({
       inject: hasBatchesWire ? ['remote', 'remote.settings'] : ['remote', 'connection'],
       apply(ctx) {
         let settings = null
-        // 面板挂载点与 React root
-        let panel = null
+        // 行内注入器:MutationObserver 监听官方设置页,reconcile 把编辑卡
+        // 挂进已展开的模型行;官方结构变化导致锚点全失时,挂浮动回退面板。
+        const roots = new Map()
+        let piAiRoutes = new Set()
+        let piAiModelIds = new Set()
+        // 破坏闩锁:锚点破坏一经判定即置位,回退面板在模型页常驻,
+        // 直到行内注入成功才解除——不随编辑器收起而丢失入口
+        let anchorsLatched = false
+        let scanPending = false
+        // 轮次序号:describe 异步返回时已可能是过期快照,过期轮次不得改状态
+        let reconcileSeq = 0
+        // 插件存活代际:effect 清理后置位,排期中的扫描与在途 describe 续体
+        // 不得再创建 React root(防清理后死注入与 root 泄漏)
         let disposed = false
         let scanTimer = null
-        let scanPending = false
+        // 回退浮动面板(单例)
+        let panel = null
 
         // settings 面按代际取形:0.1.2+ 点分声明下 fiber 等挂载完成才激活,
         // apply 时已就绪,直接取形;0.1.1 无 typed 面,轮询从 api 相位起——
@@ -599,14 +722,45 @@ window.__ModuleLoader__.load({
           const outlet = document.querySelector('[data-slot="settings.section"]')
           if (outlet === null) return null
           // 标题探测不假设具体标签:官方设置区标题曾用 h2,后续版本可能换语义
-          // 标签;遍历 outle 直接子级的 1~3 级标题做精确匹配,兼顾两种形态。
+          // 标签;遍历 outlet 的 1~3 级标题做精确匹配,兼顾两种形态。
           let titleMatched = false
           for (const heading of outlet.querySelectorAll('h1, h2, h3')) {
             if (isModelsTitle((heading.textContent || '').trim())) { titleMatched = true; break }
           }
-          // 标题缺失(如折叠态)不判负:只要命名空间可读,面板内 provider 下拉
-          // 与模型行自证;标题匹配仅用于"在非模型设置页隐藏面板"的收窄。
-          return { outlet, titleMatched }
+          const details = outlet.querySelector('details')
+          // 行内锚点:官方模型行的「模型 ID」输入框(展开编辑器后出现)
+          const idInputs = titleMatched
+            ? [...outlet.querySelectorAll('input[aria-label^="模型 ID"], input[aria-label^="Model ID"]')]
+            : []
+          return { outlet, titleMatched, hasEditor: details !== null, idInputs }
+        }
+
+        // 行内注入:把 RowEditor 卡挂进官方模型行(「模型 ID」输入框的 entry 容器)。
+        // 结构假设(照参考包):idInput → div(模型行) → parentElement(entry 容器),
+        // 编辑器 details 的上一个兄弟节点文本 = provider route。
+        function entryOf(idInput) {
+          const modelRow = idInput.closest('div')
+          return modelRow !== null ? modelRow.parentElement : null
+        }
+
+        function mountRow(face, idInput) {
+          const entry = entryOf(idInput)
+          if (entry === null || entry.querySelector(':scope > .tl-inline-root') !== null) return false
+          const details = idInput.closest('details')
+          const editor = details !== null ? details.parentElement : null
+          if (editor === null) return false
+          const route = editor.firstElementChild !== null ? editor.firstElementChild.textContent : null
+          const modelId = idInput.value
+          if (route === null || modelId.length === 0) return false
+          // 只挂 llm-pi-ai 管理的模型:route/modelId 双重核对,防误挂他源行
+          if (!piAiRoutes.has(route) || !piAiModelIds.has(modelId)) return false
+          const container = document.createElement('div')
+          container.className = 'tl-inline-root'
+          entry.appendChild(container)
+          const root = createRoot(container)
+          root.render(React.createElement(RowEditor, { settings: face, route, modelId, idInputEl: idInput }))
+          roots.set(container, root)
+          return true
         }
 
         // 样式表只注入一份,挂 document.head;清理时随插件生命周期移除
@@ -618,6 +772,7 @@ window.__ModuleLoader__.load({
           document.head.appendChild(style)
         }
 
+        // 回退浮动面板:锚点破坏时挂起,行内注入恢复即收起
         function disposePanel() {
           if (panel === null) return
           const { container, root } = panel
@@ -625,11 +780,13 @@ window.__ModuleLoader__.load({
           root.unmount()
           container.remove()
         }
-
+        function hidePanel() {
+          if (panel !== null) panel.container.style.display = 'none'
+        }
         function ensurePanel() {
-          if (panel !== null) return
-          // 挂载点探测:优先设置对话框;部分宿主版本设置区是路由页/抽屉而非
-          // dialog 结构,fixed 定位的浮动面板挂在 body 一样成立,不能因此放弃。
+          if (panel !== null) { panel.container.style.display = ''; return }
+          // 挂载点探测:优先设置对话框;无 dialog 结构(路由页/抽屉)时
+          // fixed 定位浮动面板挂 body 一样成立
           const dialog = [...document.querySelectorAll('[role="dialog"]')]
             .find((node) => node.querySelector('[data-slot="settings.section"]') !== null)
           const mount = dialog !== undefined ? dialog : document.body
@@ -638,21 +795,70 @@ window.__ModuleLoader__.load({
           container.className = 'tl-root'
           mount.appendChild(container)
           const root = createRoot(container)
-          root.render(React.createElement(ThinkingPanel, { settings }))
+          root.render(React.createElement(FallbackPanel, { settings }))
           panel = { container, root }
         }
 
         function reconcile() {
           if (disposed || settings === null) return
-          // 已脱离文档的挂载点:官方页卸载或重建了对话框,释放对应 root
+          // 已脱离文档的挂载点:官方页卸载或重建了行,释放对应 root
+          for (const [container, root] of roots) {
+            if (!container.isConnected) {
+              roots.delete(container)
+              root.unmount()
+            }
+          }
           if (panel !== null && !panel.container.isConnected) disposePanel()
           const info = docInfo()
-          if (info === null) { disposePanel(); return }
-          // 标题未匹配(其他设置分区)时收起面板,仅在模型页展示;
-          // titleMatched 为 false 且面板未挂时不挂,避免全设置页常驻
-          if (!info.titleMatched && panel === null) return
-          if (!info.titleMatched) { disposePanel(); return }
-          ensurePanel()
+          if (info === null || !info.titleMatched) { hidePanel(); return }
+          // 代际先行:作废在途 describe 续体,防 stale 续体以旧 DOM 快照 mountRow
+          const seq = ++reconcileSeq
+          // 全部行已挂载:零 RPC 早退,消灭注入容器自身触发的自激励扫描;
+          // 全挂载即注入健康,复位闩锁并收起回退面板
+          if (info.idInputs.length > 0 && info.idInputs.every((input) => {
+            const entry = entryOf(input)
+            return entry !== null && entry.querySelector(':scope > .tl-inline-root') !== null
+          })) {
+            anchorsLatched = false
+            hidePanel()
+            return
+          }
+          ensureStyle()
+          // 锚点破坏同步判定提前到 describe 之前(输入全来自同一 DOM 快照):
+          // 编辑器已展开却无任何「模型 ID」输入 = 官方结构已变,闩锁回退
+          if (anchorsBroken({
+            titleMatched: info.titleMatched,
+            hasEditor: info.hasEditor,
+            modelIdInputCount: info.idInputs.length,
+          })) {
+            anchorsLatched = true
+            ensurePanel()
+            return
+          }
+          void (async () => {
+            try {
+              const value = await settings.describe()
+              if (disposed || seq !== reconcileSeq) return
+              const ns = findNsEntry(value)
+              if (ns === undefined) return
+              const providers = ns.value && typeof ns.value === 'object' ? ns.value.providers : {}
+              piAiRoutes = new Set(Object.keys(providers && typeof providers === 'object' ? providers : {}))
+              piAiModelIds = new Set()
+              for (const route of piAiRoutes) {
+                for (const model of modelsOf(ns.value, route)) piAiModelIds.add(String(model.id))
+              }
+              for (const idInput of info.idInputs) {
+                mountRow(settings, idInput)
+              }
+              // 行内注入成功即解闩收面板
+              anchorsLatched = false
+              hidePanel()
+            } catch {
+              // describe 失败:保持现状,下次 mutation 重试;闩锁已置位时
+              // 回退入口必须先出现,数据加载失败由面板内部呈现
+              if (!disposed && anchorsLatched) ensurePanel()
+            }
+          })()
         }
 
         function scheduleScan() {
@@ -671,11 +877,18 @@ window.__ModuleLoader__.load({
             disposed = true
             if (scanTimer !== null) clearTimeout(scanTimer)
             observer.disconnect()
+            for (const [container, root] of roots) {
+              root.unmount()
+              // 容器必须随 root 一起移除:残留空容器会让再注入被 mountRow 的
+              // 已挂载守卫永久拒绝,且全挂载早退分支会误判注入健康
+              container.remove()
+              roots.delete(container)
+            }
             disposePanel()
             const style = document.getElementById('tl-style')
             if (style !== null) style.remove()
           }
-        }, 'thinking-levels: models-page panel')
+        }, 'thinking-levels: models-page injector')
       },
     }
   },

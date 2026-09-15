@@ -108,7 +108,7 @@ test('面选择:0.1.1 形态(无 wire)typed 缺失走 connection.api 面', async
       connection: { api: { settings: { describe() {}, mutate() {} } } },
       effect: (fn, name) => effects.push(name),
     })
-    assert.deepEqual(effects, ['thinking-levels: models-page panel'])
+    assert.deepEqual(effects, ['thinking-levels: models-page injector'])
     dispose()
   })
 })
@@ -122,7 +122,7 @@ test('面选择:0.1.2+(wire)typed 面挂载完成,apply 期直接消费', async 
       connection: null,
       effect: (fn, name) => effects.push(name),
     })
-    assert.deepEqual(effects, ['thinking-levels: models-page panel'])
+    assert.deepEqual(effects, ['thinking-levels: models-page injector'])
     dispose()
   })
 })
