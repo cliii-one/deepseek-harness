@@ -727,46 +727,64 @@ window.__ModuleLoader__.load({
           for (const heading of outlet.querySelectorAll('h1, h2, h3')) {
             if (isModelsTitle((heading.textContent || '').trim())) { titleMatched = true; break }
           }
-          const details = outlet.querySelector('details, .editor')
+          // 编辑器展开探测:官方结构是哈希类名 div,不能用类锚;模型 ID 输入
+          // 框本身即"编辑器已展开"的铁证(未展开时不渲染 modelCatalog 的行),
+          // hasEditor 以 section[aria-label=模型目录] 存在与否判定
+          const catalog = outlet.querySelector('section[aria-label="模型目录"], section[aria-label="Models"]')
           // 行内锚点:官方模型行的「模型 ID」输入框(aria-label 带 index 后缀:
           // 官方写法 `${t("modelId")} ${index+1}`,前缀匹配兼容 zh/en 两语)
           const idInputs = titleMatched
             ? [...outlet.querySelectorAll('input[aria-label^="模型 ID"], input[aria-label^="Model ID"]')]
             : []
-          return { outlet, titleMatched, hasEditor: details !== null, idInputs }
+          return { outlet, titleMatched, hasEditor: catalog !== null, idInputs }
         }
 
-        // 行内注入:把 RowEditor 卡挂进官方模型行(modelEntry 卡片尾部)。
-        // 官方结构(源码 dsh-client-ui-settings-models):
-        //   li.rowCard[key=provider] > div.editor > (editorHeader{editorTitle,editorRoute}
-        //   + section.modelCatalog > div.modelEntry > div.modelRow > input[aria-label="模型 ID n"])
-        // —— 每个 provider 卡内部各有一份 modelCatalog,卡内各行共享同一 route。
+        // 行内注入:把 RowEditor 卡挂进官方模型行容器。官方 CSS 类名是构建
+        // 哈希(zGbnIq_modelEntry),不能作锚;模型行的稳定结构是
+        // section[aria-label=模型目录/Models] > div.modelList > div.modelEntry >
+        // (div.modelRow + div.modelAdvanced)。modelEntry = 模型 ID 输入框的
+        // 祖先链上"modelRow 的父级",以 DOM 结构而非类名识别。
         function entryOf(idInput) {
-          const entry = idInput.closest('.modelEntry')
-          if (entry !== null) return entry
-          // 结构漂移兜底:沿官方旧版 div 嵌套上溯(参考包 0.6.0 同款)
-          const modelRow = idInput.closest('div')
-          return modelRow !== null ? modelRow.parentElement : null
+          // 模型 ID 输入框在 modelRow 网格里;modelRow 的父级即 modelEntry 卡
+          const row = idInput.parentElement
+          if (row !== null && row.parentElement !== null) {
+            // 确认 row 确实是"行网格"(含 ID+名称+两个按钮 4 个网格子项)
+            const inputs = row.querySelectorAll(':scope > input')
+            const buttons = row.querySelectorAll(':scope > button')
+            if (inputs.length >= 1 && buttons.length >= 2) return row.parentElement
+          }
+          // 结构漂移兜底:closest section 的父级(整组模型列表容器)
+          const section = idInput.closest('section')
+          return section !== null ? section : null
         }
 
-        // route 解析:从模型行向上找 provider 编辑器(.editor),其 editorRoute
-        // span 承载 route id(editorTitle 是 displayName,两者仅在 displayName ≠
-        // route 时并存;displayName === route 时 editorRoute 不渲染,回落
-        // editorTitle)。找不到 .editor 时按参考包旧结构 details 前兄弟取文本。
+        // route 解析:官方 UI 的 CSS 类名是构建哈希(zGbnIq_*),不能作锚;用
+        // 不变的 aria/DOM 结构锚定。provider 卡头部的「编辑」按钮 aria-label
+        // 内嵌 route:providerTargetLabel 在 displayName ≠ route 时为
+        // "displayName (route)",相等时为 route 本身——括号内或整串即 route id。
+        // 按钮与编辑器同属一张 rowCard(li, key=provider),从模型行向上取最近
+        // rowCard 再找其编辑按钮。rowCard 哈希类名不可用,以「编辑」按钮
+        // aria-label 前缀识别后回溯其卡片容器(li)。
         function routeOf(idInput) {
-          const editor = idInput.closest('.editor')
-          if (editor !== null) {
-            const routeSpan = editor.querySelector('.editorRoute')
-            if (routeSpan !== null && routeSpan.textContent.length > 0) return routeSpan.textContent.trim()
-            const titleSpan = editor.querySelector('.editorTitle')
-            if (titleSpan !== null && titleSpan.textContent.length > 0) return titleSpan.textContent.trim()
-            return null
+          // 编辑器区(展开的 provider 编辑表单)不含编辑按钮;按钮在卡头部,
+          // 需要从 idInput 沿 section[aria-label=模型目录] 向上到卡片根(li)
+          const section = idInput.closest('section')
+          if (section === null) return null
+          let card = section.parentElement
+          while (card !== null && card.tagName !== 'LI') card = card.parentElement
+          if (card === null) return null
+          // 卡片根找「编辑」按钮:aria-label 以词条前缀开头(中英两语)
+          for (const button of card.querySelectorAll('button[aria-label]')) {
+            const label = button.getAttribute('aria-label') || ''
+            let route = null
+            if (label.startsWith('编辑 ')) route = label.slice(3)
+            else if (label.startsWith('Edit ')) route = label.slice(5)
+            if (route === null) continue
+            // "displayName (route)" 取括号内;否则整串即 route
+            const match = /^(.*) \(([^()]+)\)$/.exec(route)
+            return match !== null ? match[2] : route
           }
-          const details = idInput.closest('details')
-          const legacyEditor = details !== null ? details.parentElement : null
-          return legacyEditor !== null && legacyEditor.firstElementChild !== null
-            ? legacyEditor.firstElementChild.textContent
-            : null
+          return null
         }
 
         function mountRow(face, idInput) {
